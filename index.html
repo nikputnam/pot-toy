@@ -1,0 +1,1305 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>pot toy</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<link type="text/css" rel="stylesheet" href="main.css">
+		<style>
+			body {
+				background-color: #f0f0f0;
+				color: #444;
+			}
+			a {
+				color: #08f;
+			}
+		</style>
+	</head>
+	<body>
+
+		<div id="container">
+			<div id="overlay">
+			</div>
+		</div>
+
+		<div id="info">
+			<a href="https://www.instagram.com/nik.ceramics/" target="_blank" rel="noopener">@nik.ceramics</a>
+			2021,2023
+	    </div>
+
+		<script type="importmap">
+			{
+				"imports": {
+					"three": "./vendor/three/three.module.js"
+				}
+			}
+		</script>
+
+		<script type="module">
+
+			import * as THREE from 'three';
+
+			import { GUI } from './vendor/lil-gui/lil-gui.module.min.js';
+
+			import { OrbitControls } from './vendor/three/controls/OrbitControls.js';
+			import { TransformControls } from './vendor/three/controls/TransformControls.js';
+			import { ParametricGeometry } from './vendor/three/geometries/ParametricGeometry.js';
+			import { OBJExporter } from './vendor/three/exporters/OBJExporter.js';
+
+			import { RGBELoader } from './vendor/three/loaders/RGBELoader.js';
+
+
+			let container;
+			let camera, scene, renderer;
+			const splineHelperObjects = [];
+			let splinePointsLength = 4;
+			const positions = [];
+			const point = new THREE.Vector3();
+			const point1 = new THREE.Vector3();
+			const point2 = new THREE.Vector3();
+			const point3 = new THREE.Vector3();
+
+			const raycaster = new THREE.Raycaster();
+			const pointer = new THREE.Vector2();
+			const onUpPosition = new THREE.Vector2();
+			const onDownPosition = new THREE.Vector2();
+
+			const geometry = new THREE.BoxGeometry( 50, 50, 50 );
+			let transformControl;
+
+			const ARC_SEGMENTS = 40;
+			const ANGLE_SEGMENTS = 90;
+
+			const splines = {};
+			let surface = {};
+
+			const params = {
+				bottom: true,
+				spiralize: false,
+				facet: false,
+				n_facets: 9,
+				twist: 0.0, 
+				puff: 0.0, 
+				squash: 1.0, 
+				uniform: false,
+				tension: 0.5,
+				centripetal: false,
+				chordal: false,
+				addPoint: addPoint,
+				removePoint: removePoint,
+				exportJson: exportJson,
+				exportToObj: exportToObj,
+				exportGcode: exportGcode,
+
+				max_height: 100.0,
+				max_width: 100.0,
+				set_height: false,
+				target_height: 100.0,
+				layer_height: 1.5,
+				bed_height: 0.0,
+				line_width: 2.0,
+				user: "anon",
+
+				texture: false,
+				texture_amplitude: 1.0,
+				texture_periods: 12,
+				texture_fraction: 0.0
+
+			};
+
+			function even_steps(spline,stepsize) {
+
+				
+
+			}
+
+
+			const surface_material = new THREE.MeshStandardMaterial( { 	
+					color: 0xaaaaaa,
+					roughness: 1.0,
+					metalness: 0.0 } 
+					);
+			surface_material.side = THREE.DoubleSide;
+
+			const bottom_material = new THREE.MeshStandardMaterial( { 	
+					color: 0x00aaaa,
+					roughness: 1.0,
+					metalness: 0.0 } 
+				);
+			bottom_material.side = THREE.DoubleSide;
+
+
+			const handle_material = new THREE.MeshStandardMaterial( { color: 0xff0000,
+					roughness: 1.0,
+					metalness: 0.0 } 
+					);
+			
+
+			const handle_material1 = new THREE.MeshStandardMaterial( { color: 0xff5500,
+					roughness: 1.0,
+					metalness: 0.0 } 
+					);
+			
+
+		//	let cubeCamera, cubeRenderTarget;
+				let cubeRenderTarget
+
+			function sor( spline, squash ) {
+				return function( u, v, pt ) {
+					//console.log(spline);
+				//	console.log(u,v,pt);
+					
+					//let r = spline.
+					// = new THREE.Vector3();
+					spline.getPoint( u, point );
+					let r = point.x;
+					let y = point.y;
+					pt.x = r*Math.cos( v* Math.PI *2.0) ;
+					pt.y = y;
+					pt.z = squash*r*Math.sin( v* Math.PI *2.0);
+				}
+			}
+
+			function log(label,message) {
+				
+				if (typeof message == 'object') {
+            		logger.innerHTML = label + (JSON && JSON.stringify ? JSON.stringify(message) : message) + '<br />' + logger.innerHTML;
+        		} else {
+            		logger.innerHTML = label + message + '<br />' + logger.innerHTML;
+        		}
+				
+			}
+
+
+			const logger = document.getElementById('overlay');
+
+			function min(x,y,z) {
+				if (x<=y && x<=z) {return x;}
+				if (y<=x && y<=z) {return y;}
+				return z;
+			}
+
+			function facet( surf, n_facets, twist, puff ) {
+
+				return function(u, v0, pt) {
+				//	const pufff = 1.0/( ( 1+Math.exp(-30.0*(u-0.1)) )*(1+Math.exp(-30.0*(-u+0.9))) ) //min(1,10*u,10*(1-u)) ;
+					//const pufff = (1-Math.exp(-u*20.0))*(1-Math.exp((-1+u)*20.0)); //min(1,10*u,10*(1-u)) ;
+                   // taper at bottom only
+					const pufff = (1-Math.exp(-u*10.0)); //min(1,10*u,10*(1-u)) ;
+					const v = v0 + u*twist ;
+					const phase = ( (v0) * n_facets)%1;
+					const deltav = phase / n_facets;
+					//const va =  (1.0/n_facets)* (     Math.floor( v * n_facets )) - ((u*twist)%1) ;
+					//const vb =  (1.0/n_facets)* ( 1.0+Math.floor( v * n_facets )) - ((u*twist)%1) ;
+					//const vb =  va + (1.0/n_facets);
+					const va = v-deltav;
+					const vb = va+(1.0/n_facets);
+					const f = phase ; // ((v - va)%1) * n_facets; 
+					surf(u,va,point1);
+					surf(u,vb,point2);
+					surf(u,v ,point3);
+					pt.x = point3.x - pufff*(puff-1)*( point1.x + f*( point2.x - point1.x ) - point3.x);
+					pt.y = point3.y - pufff*(puff-1)*( point1.y + f*( point2.y - point1.y ) - point3.y);
+					pt.z = point3.z - pufff*(puff-1)*( point1.z + f*( point2.z - point1.z ) - point3.z);
+//					pt.y = point1.y + f*( point2.y - point1.y );
+//					pt.z = point1.z + f*( point2.z - point1.z );
+
+				}
+			}
+
+			function bbox() {
+
+				var fn =  sor(surface.spline, params.squash);
+				if (params.facet == true) { 
+					//log("faceting on: ", fn); 
+					fn = facet(sor(surface.spline, params.squash), params.n_facets, params.twist, params.puff  ) ;
+					//log("faceting on:- ", fn); 
+				}
+
+				const nu = surface.spline.points.length * 10
+				const nv = 60 
+
+				const du = 1.0/(nu-1)
+				const dv = 1.0/(nv-1)
+
+				const box = [...Array(nu).keys()].map( ui => ui*du).flatMap(
+					function(u) {
+						return [...Array(nv).keys()].map( vi => vi*dv).map( function(v){
+							var p = new THREE.Vector3(0,0,0)
+							fn(u,v,p)
+							return p
+						}
+						)
+					}
+
+				).reduce( function( range,p ) {
+					return( [
+					[ Math.min(p.x,range[0][0]), Math.max(p.x,range[0][1]) ],
+					[ Math.min(p.y,range[1][0]), Math.max(p.y,range[1][1]) ],
+					[ Math.min(p.z,range[2][0]), Math.max(p.z,range[2][1]) ]
+				
+					] )
+				} ,[[1.0e6,-1.0e6],[1.0e6,-1.0e6],[1.0e6,-1.0e6]]  )
+				//console.log("bbox",box)
+				return box
+			}
+
+			function evenly_spaced_samples( spline, samples,l, n ) {
+				var times = []
+
+				var ds = l/(n-1)
+				var s = 0.0
+				var s0 = samples[0][0]
+				var i = 0
+				var j=0
+				var s0 = samples[j][1] 
+				var s1 = samples[j+1][1]
+				var t0 = samples[j][0] 
+				var t1 = samples[j+1][0] 
+				var dt = t1-t0
+				var ss = s1-s0
+				while (i<n) {
+					while ((j<(samples.length-2)) && samples[j+1][1]<s) {
+						j++; 
+						s0 = samples[j][1] 
+						s1 = samples[j+1][1]
+						t0 = samples[j][0] 
+						t1 = samples[j+1][0] 
+						dt = t1-t0
+						ss = s1-s0
+					}
+					const f = ( (s-s0)/ss )
+					const u = t0 + f*dt
+					//if (u>1.0) { console.log("u>1",i,s,u,j,samples.length,samples[j][0],samples[j][1], samples[j+1][0],samples[j+1][1]) }
+					times.push(u)
+					s += ds 
+					i++
+				}
+				return(times)
+
+			}
+
+
+			function scale_factor() {
+				const box = bbox()
+
+				const height = Math.abs(box[1][1]-box[1][0])
+				const width = Math.max( Math.abs(box[0][1]-box[0][0]), Math.abs(box[2][1]-box[2][0]))
+				// expert override: scale so the printed height matches target_height,
+				// ignoring the max_height / max_width box
+				if (params.set_height) {
+					return params.target_height / height
+				}
+				const height_scale = params.max_height / height 
+				const width_scale = params.max_width / width
+				const sf = Math.min( height_scale, width_scale ) 
+				return sf
+			}
+
+			/*
+
+				const scale_fact = scale_factor()
+				const length_samples = surface.spline.points.length * 10
+				const dt = 1.0/(length_samples-1)
+				const samples = [...Array(length_samples).keys()].map( x => x*dt).map(x => [x,surface.spline.getPoint(x)] )
+
+				const total_length = samples.reduce( function(acc,cv) {
+						var d = acc[1] +  cv[1].distanceTo( acc[0] ) 
+						return( [ cv[1], d ] ) 
+					}, [samples[0][1], 0.0]
+				)[1]
+
+				//const n_layers = Math.floor(total_length/(params.layer_height/scale_fact))
+
+			*/
+
+			// Serpentine raster that fills the (squashed) disk of radius R at height y.
+			// Rows run parallel to x, one line width apart. The path starts and ends at
+			// the center so it joins the inward spiral before it and the outward spiral
+			// after it. Each half of the disk (z >= 0, then z < 0) is covered as: half a
+			// row out from the center, an arc along the perimeter up to the pole, a
+			// serpentine back down through every row, and the other half of the first
+			// row into the center. Rows are inset one line width on the side the arc
+			// runs along, so nothing crosses.
+			function bottomRaster(R, lw, y) {
+
+				const zmax = params.squash * R
+				const outer = function(k) {
+					const zz = k*lw / params.squash
+					return ( Math.abs(zz) < R ) ? Math.sqrt( R*R - zz*zz ) : 0.0
+				}
+				const dphi = 2.0*Math.PI / 360.0
+
+				const pts = []
+				const push = function(p) {
+					if ( pts.length == 0 || pts[pts.length-1].distanceTo(p) > 1e-9 ) pts.push( p )
+				}
+				const pt = function(x, k) { push( new THREE.Vector3( x, y, k*lw ) ) }
+
+				// h: row index of the half rows (0 for the +z half, -1 for the -z half)
+				// s: direction of travel in z (+1 or -1)
+				// a: side (+1 or -1 in x) the perimeter arc runs along
+				const half = function(h, s, a) {
+					// full rows k = h + s*j, j = 1 .. n, all inside the disk
+					const n = Math.ceil( zmax/lw - Math.abs(h) ) - 1
+					// row end on the arc side is inset one line width; the far side reaches the perimeter
+					const end = function(k, side) { return ( side == a ) ? Math.max( 0.0, outer(k) - lw ) : outer(k) }
+					// the last row visited (h+s) must end on the far side: n rows flip the side n times
+					const start = ( n % 2 == 0 ) ? -a : a
+					const K = h + s*n
+
+					pt( 0.0, 0 )
+					pt( 0.0, h )
+					pt( a*end(h, a), h )
+
+					// perimeter arc: x = a*R*cos(phi), z = zmax*sin(phi), from row h to the top row
+					const phi_h = Math.asin( h*lw / zmax )
+					const phi_K = Math.asin( K*lw / zmax )
+					const phi_end = ( start == a ) ? phi_K : s*Math.PI - phi_K
+					const n_arc = Math.max( 1, Math.ceil( Math.abs(phi_end - phi_h) / dphi ) )
+					for (let i = 0; i <= n_arc; i++) {
+						const phi = phi_h + (phi_end - phi_h) * i / n_arc
+						push( new THREE.Vector3( a*R*Math.cos(phi), y, zmax*Math.sin(phi) ) )
+					}
+
+					var side = start
+					for (let j = n; j >= 1; j--) {
+						const k = h + s*j
+						pt(  side*end(k,  side), k )
+						pt( -side*end(k, -side), k )
+						side = -side
+					}
+					pt( -a*end(h, -a), h )
+					pt( 0.0, h )
+					pt( 0.0, 0 )
+				}
+
+				half( 0, 1, 1 )
+				half( -1, -1, -1 )
+
+				return pts
+			}
+
+			function bottomPath(r0,total_length,scale_fact) {
+
+				const length_samples = surface.spline.points.length * 10
+				const dt = 1.0/(length_samples-1)
+				const n_layers = Math.floor(total_length/(params.layer_height/scale_fact))
+				const n_angular_steps = 1000
+				const n = n_layers*n_angular_steps
+
+				var p0 = new THREE.Vector3(0,0,0)
+
+				//fn(0,0,p0)
+				var p1 = p0.clone()
+
+				p0.x = 0.0 
+				p0.z = 0.0
+
+				//const r0 = p0.distanceTo(p1)
+				const lw = (params.line_width / scale_fact)
+				r0 += params.line_width/scale_fact
+				const turns = r0 / lw
+				const ns = Math.floor(turns * n_angular_steps )
+				console.log(ns,turns,lw,r0)
+				const dtheta = 2*Math.PI / n_angular_steps
+				var theta = -(turns % 1.0)*2.0*Math.PI
+				var dr = r0 / ns
+				var r = r0
+				var yl = p0.y
+				//console.log( "tail:",-lw*3*Math.sin(theta+Math.PI/2),p0.y, -lw*3*Math.cos(theta) )
+				//const ptail = new THREE.Vector3( -lw*3*Math.sin(theta+Math.PI/2),p0.y, lw*3*Math.cos(theta+Math.PI/2) )
+				const ptail = new THREE.Vector3( r*Math.cos(theta) -lw*3,p0.y, params.squash* r*Math.sin(theta) - 3*lw )
+				var sp_in = [...Array(ns).keys()].map( x => x*dt).map(
+					function(x) {
+						var p = new THREE.Vector3( r*Math.cos(theta),yl,params.squash* r*Math.sin(theta) )
+						theta += dtheta
+						r -= dr
+						return p
+					}
+				)
+				// middle layer: back-and-forth raster filling the base
+				yl += params.layer_height/scale_fact
+				const raster = bottomRaster( r0 - lw/2.0, lw, yl )
+
+				var theta = -(turns % 1.0)*2.0*Math.PI
+				var r = 0
+				//					yl *= 2.0 //params.layer_height
+				yl += params.layer_height/scale_fact
+				var sp_out = [...(Array(ns- Math.floor(params.line_width/scale_fact/dr)).keys()  )].map( x => x*dt).map(
+					function(x) {
+						var p = new THREE.Vector3( r*Math.cos(theta),yl,params.squash* r*Math.sin(theta) )
+						theta += dtheta
+						r += dr
+						return p
+					}
+				)
+				return [ptail].concat( sp_in, raster, sp_out )
+
+			}
+
+			function spiralPath(scale_fact) {
+				
+				const length_samples = surface.spline.points.length * 10
+				const dt = 1.0/(length_samples-1)
+				//console.log("dt=",dt)
+				const samples = [...Array(length_samples).keys()].map( x => x*dt).map(x => [x,surface.spline.getPoint(x)] )
+
+				const total_length = samples.reduce( function(acc,cv) {
+						var d = acc[1] +  cv[1].distanceTo( acc[0] ) 
+						return( [ cv[1], d ] ) 
+					}, [samples[0][1], 0.0]
+				)[1]
+				//console.log(total_length)
+				//console.log(samples)
+
+
+				const distances =  samples.reduce( function([ last_p, dv, last_d ],[t,p]) {
+						var dd = p.distanceTo( last_p )
+						var d = last_d + dd
+						dv.push( [t,d] )
+						return( [ p, dv, d ] ) 
+					}, [samples[0][1], [], 0.0 ]
+				)[1]
+
+
+				const n_layers = Math.floor(total_length/(params.layer_height/scale_fact))
+				const n_angular_steps = 1000
+				const n = n_layers*n_angular_steps
+
+
+				//console.log(distances)
+				const tv = evenly_spaced_samples( surface.spline, distances,total_length, n )
+				//console.log("last tv:",tv.slice(-1))
+
+				const da = 1.0 / (n_angular_steps)
+				var i = 0.0
+				//console.log("da",da)
+			//	console.log("twist",params.twist)
+
+				let fn =  sor(surface.spline, params.squash);
+				if (params.facet == true) { 
+					//log("faceting on: ", fn); 
+					fn = facet(sor(surface.spline, params.squash), params.n_facets, params.twist, params.puff  ) ;
+					//log("faceting on:- ", fn); 
+				}
+
+				var p = new THREE.Vector3(0, 0, 0)
+
+				// texture: radial sine wave along the toolpath. The wave is a function of the
+				// unwrapped angle v (in turns), so the fractional periods per turn produce a
+				// phase shift between successive turns of the spiral.
+				const texture_on = params.texture && params.texture_amplitude > 0.0
+				const texture_periods = params.texture_periods + params.texture_fraction
+				const texture_amp = params.texture_amplitude / scale_fact
+
+				var points = tv.map( function(t) {
+					var v = i*da - params.twist*t 
+					i = i + 1
+					return( [t,v]  )
+				} ).map( function([u,v]) {
+					fn(u,v%1.0,p)
+					if (texture_on) {
+						const r = Math.sqrt( p.x*p.x + p.z*p.z )
+						if (r > 0.0) {
+							const s = texture_amp * Math.sin( 2.0*Math.PI * texture_periods * v )
+							const rs = Math.max( 0.0, r + s ) / r
+							p.x *= rs
+							p.z *= rs
+						}
+					}
+					return p.clone()
+//					
+				} )
+
+				var p0 = new THREE.Vector3(0,0,0)
+				p0 = points[0].clone()
+
+				points = points.map( function(p) { p.y = Math.max(p.y,p0.y); return p } )
+
+				var sp = []
+				if (params.bottom) {
+
+//					fn(0,0,p0)
+					var p1 = p0.clone()
+
+					p0.x = 0.0 
+					p0.z = 0.0
+
+					const r0 = p0.distanceTo(p1)
+					console.log("sp")
+					var bottom_points = bottomPath(r0,total_length,scale_fact).map( function(p) { p.y += p0.y; return p } )
+					//console.log("z")
+					//points.map(  function(p) { p.y += params.layer_height/scale_fact }  )
+					bottom_points.map( function(p) { p.y -= 2.0*params.layer_height/scale_fact } )
+					//points = bottom_points.concat(points.map ( function(p) { p.y += params.layer_height/scale_fact } ) )
+					points = bottom_points.concat(points )
+					//					points = [ptail].concat( sp_in.concat( sp_out.concat(points ) ) )
+
+				}
+
+				return points
+
+			}
+
+			function exportGcode() {
+				const sf = scale_factor()
+				const box = bbox()
+				const miny = box[1][0]
+				// position of center on bed (use 0,0 for delta printer)
+//				const tx = 300 
+//				const ty = 300
+
+				const tx = 100 
+				const ty = 100
+
+
+
+//				const tx = 0 
+//				const ty = 0
+				var tz = params.bed_height + params.layer_height
+				if (params.bottom) {
+					// inward spiral, raster, outward spiral: three bottom layers under the wall
+					tz = params.bed_height + 3.0*params.layer_height
+				}
+				const sppoints = spiralPath( scale_factor() ).map(function(p) { 
+					p.y -= miny //+ (params.bottom ? params.layer_height/scale_factor() :  0.0 )
+					return p
+				}).map(function(p) { 
+					p.x *= sf; p.y *= sf; p.z *= sf; 
+					return p
+				}).map(function(p) { 
+					var w = p.y ; p.y = -p.z ; p.z = w; 
+					return p
+				}).map(function(p) { 
+					p.x += tx;  p.y += ty  ; p.z += tz
+					return p
+				})
+
+
+				//" "+p.x+" "+p.y+" "+p.z+"\n" //
+				// layer index for PrusaSlicer-style ;LAYER_CHANGE markers: the wall is a
+				// continuous spiral, so mark each time Z crosses a layer-height boundary
+				const layerIndex = function(z) {
+					return Math.floor( (z - params.bed_height) / params.layer_height + 1e-6 )
+				}
+				const layerChange = function(z) {
+					return ";LAYER_CHANGE\n;Z:" + z.toFixed(3) + "\n;HEIGHT:" + params.layer_height + "\n"
+				}
+
+				var dd = 0
+				var lp = sppoints[0]
+				var layer = layerIndex( lp.z )
+				var gcode = sppoints.map(
+					function(p){ 
+					var r = ""
+					const l = layerIndex( p.z )
+					if (l > layer) {
+						r += layerChange( p.z )
+						layer = l
+					}
+					dd += 0.4 * p.distanceTo(lp)
+					r += "G1 X"+p.x+" Y"+p.y+" Z"+p.z+" E"+dd+"\n" 
+					lp = p 
+					return r 
+				}
+				).reduce( (a,b)=>a+b , "")
+
+			//	console.log(points)
+//				const exporter = new OBJExporter();
+//G1 E{ext} F900
+
+				const footer = "G1 E"+(dd-0.5)+ " F900\n" + `G92 E0
+G91 ; set relative coordination
+G1 Z50 F300 ;move 5mm up with 300 speed
+G90 ; set absolute coordination
+G1 X200  F2400 ; home X axis
+`
+				var info = ";" + model_json() + "\n"
+				info += "; bed_height: " + params.bed_height + "\n"
+				info += "; layer_height: " + params.layer_height + "\n"
+				info += "; line_width: " + params.line_width + "\n"
+				info += "; scale_factor: " + scale_factor() + "\n"
+				info += "; set_height: " + params.set_height + (params.set_height ? " (" + params.target_height + " mm)" : "") + "\n"
+
+				const header = `M107
+;TYPE:Custom
+G28 ; home all axes
+
+G21 ; set units to millimeters
+G90 ; use absolute coordinates
+M82 ; use absolute distances for extrusion
+G92 E0
+; Filament gcode
+M107
+${layerChange( sppoints[0].z )}G1 Z70 F9000
+G1 E-.3 F900
+G92 E0
+G1 E.4 F900
+M204 S150
+;TYPE:External perimeter
+;WIDTH:3
+G1 F3360
+`;
+				const result = info + header + "G1 X"+sppoints[0].x+" Y"+sppoints[0].y+"\n" + gcode + footer
+
+				saveString( result, params.user + "_" + randomID(5) + ".gcode" );
+
+			}
+
+
+			function exportJson() {
+	
+				saveString( model_json() , params.user + "_" + randomID(5) + ".json" );
+
+			}
+
+
+			function randomID(n) {
+				const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjklmnpqrstuvwxyz23456789".split("")
+				return [...Array(n).keys()].map( x => chars[ Math.floor(Math.random() * chars.length) ] ).reduce( (a,b)=>a+b , "")
+			}
+
+			function exportToObj() {
+
+				const exporter = new OBJExporter();
+				const result = exporter.parse( surface.mesh );
+				saveString( result, params.user + "_" + randomID(5) + ".obj"  );
+
+			}
+
+			const link = document.createElement( 'a' );
+			link.style.display = 'none';
+			document.body.appendChild( link );
+
+			function save( blob, filename ) {
+
+				link.href = URL.createObjectURL( blob );
+				link.download = filename;
+				link.click();
+
+			}
+
+
+			function saveString( text, filename ) {
+
+				save( new Blob( [ text ], { type: 'text/plain' } ), filename );
+
+			}
+
+
+			init();
+
+			function init() {
+
+				container = document.getElementById( 'container' );
+
+				scene = new THREE.Scene();
+
+				//
+		//		cubeRenderTarget = new THREE.WebGLCubeRenderTarget( 256 );
+		//		cubeRenderTarget.texture.type = THREE.HalfFloatType;
+
+		//		cubeCamera = new THREE.CubeCamera( 1, 1000, cubeRenderTarget );
+
+			//	scene.background = new THREE.Color( 0xf0f0f0 );
+
+				camera = new THREE.PerspectiveCamera( 70, window.innerWidth / window.innerHeight, 1, 10000 );
+				camera.position.set( 0, 1000, 2000 );
+				scene.add( camera );
+
+				
+				scene.add( new THREE.AmbientLight( 0x555555 ) );
+
+				
+				const light = new THREE.SpotLight( 0xffffff, 0.7 );
+				light.position.set( 200, 1500, 900 );
+				light.angle = Math.PI * 0.7;
+				light.castShadow = false;
+			//	light.shadow.camera.near = 200;
+	//			light.shadow.camera.far = 2000;
+	//			light.shadow.bias = - 0.000222;
+	//			light.shadow.mapSize.width = 1024;
+	//			light.shadow.mapSize.height = 1024;
+				scene.add( light );
+
+				/*
+				const light2 = new THREE.AmbientLight( 0xff0000, 1.5 );
+				light2.position.set( 0, 1500, 2000 );
+			//	light.angle = Math.PI * 0.2;
+				light2.castShadow = false;
+			//	light.shadow.camera.near = 200;
+			//	light.shadow.camera.far = 2000;
+				//light.shadow.bias = - 0.000222;
+				//light.shadow.mapSize.width = 1024;
+			//	light.shadow.mapSize.height = 1024;
+				scene.add( light2 );
+				*/
+
+
+				const planeGeometry = new THREE.PlaneGeometry( 2000, 2000 );
+				planeGeometry.rotateX( - Math.PI / 2 );
+				const planeMaterial = new THREE.ShadowMaterial( { color: 0x000000, opacity: 0.2 } );
+
+				const plane = new THREE.Mesh( planeGeometry, planeMaterial );
+				plane.position.set(0,-200,0);
+				plane.receiveShadow = true;
+				scene.add( plane );
+
+				const helper = new THREE.GridHelper( 2000, 100 );
+				helper.position.y = 0;
+				helper.material.opacity = 0.25;
+				helper.material.transparent = true;
+				scene.add( helper );
+
+				renderer = new THREE.WebGLRenderer( { antialias: true } );
+				renderer.setPixelRatio( window.devicePixelRatio );
+				renderer.setSize( window.innerWidth, window.innerHeight );
+				renderer.toneMapping = THREE.ACESFilmicToneMapping;
+
+//				renderer.shadowMap.enabled = true;
+				container.appendChild( renderer.domElement );
+
+				const gui = new GUI();
+
+				gui.add( params, 'bottom' ).onChange( function ( value ) {
+					//splines.uniform.tension = value;
+					updateSplineOutline();
+					render();
+
+					} );
+
+				gui.add( params, 'spiralize' ).name( 'Show spiral toolpath' ).onChange( function ( value ) {
+					//splines.uniform.tension = value;
+					updateSplineOutline();
+					render();
+
+				} );
+
+
+				gui.add( params, 'facet' ).onChange( function ( value ) {
+
+					//splines.uniform.tension = value;
+					updateSplineOutline();
+					render();
+
+					} );
+
+
+				gui.add( params, 'n_facets', 3, 24 ).step( 1 ).onChange( function ( value ) {
+
+					//splines.uniform.tension = value;
+					updateSplineOutline();
+					render();
+
+				} );
+			//	gui.add( params, 'uniform' ).onChange( render );
+				gui.add( params, 'twist', 0, 1 ).step( 0.01 ).onChange( function ( value ) {
+
+				//	splines.uniform.tension = value;
+					updateSplineOutline();
+					render();
+
+				} );			
+				gui.add( params, 'squash', 0.1, 1.0 ).step( 0.01 ).onChange( function ( value ) {
+
+				//	splines.uniform.tension = value;
+					updateSplineOutline();
+					render();
+
+				} );
+				gui.add( params, 'puff', -10, 10 ).step( 0.1 ).onChange( function ( value ) {
+
+				//	splines.uniform.tension = value;
+					updateSplineOutline();
+					render();
+
+				} );
+				/*
+				gui.add( params, 'tension', 0, 1 ).step( 0.01 ).onChange( function ( value ) {
+
+					splines.uniform.tension = value;
+					updateSplineOutline();
+					render();
+
+				} );
+				gui.add( params, 'centripetal' ).onChange( render );
+				gui.add( params, 'chordal' ).onChange( render );
+				*/
+				gui.add( params, 'addPoint' );
+				gui.add( params, 'removePoint' );
+
+				let tex = gui.addFolder( 'Texture' );
+				function textureChanged() {
+					if (params.spiralize) {
+						updateSplineOutline();
+						render();
+					}
+				}
+				tex.add( params, 'texture' ).name( 'Radial sine wave' ).onChange( textureChanged );
+				tex.add( params, 'texture_amplitude', 0.0, 5.0 ).name( 'Amplitude (mm)' ).step( 0.1 ).onChange( textureChanged );
+				tex.add( params, 'texture_periods', 0, 60 ).name( 'Periods per turn' ).step( 1 ).onChange( textureChanged );
+				tex.add( params, 'texture_fraction', 0.0, 1.0 ).name( 'Fractional periods' ).step( 0.01 ).onChange( textureChanged );
+				tex.close();
+
+				let h = gui.addFolder( 'Export' );
+				h.add(params, 'user').name("Name (for labeling files):")
+				h.add( params, 'exportToObj' ).name( 'Export OBJ' );
+				h.add( params, 'exportGcode' ).name( 'Export Gcode' );
+				h.add( params, 'exportJson' ).name( 'Export JSON' );
+				h.close()
+
+				let prs = gui.addFolder( '(Expert) Printer Settings' );
+				prs.add( params, 'bed_height' , 0.0, 15.0 ).name( 'Bed Height' ).step(0.5);
+				prs.add( params, 'layer_height' , 0.0, 3.0 ).name( 'Layer Height' ).step(0.1).onChange( function ( value ) {
+
+				//	splines.uniform.tension = value;
+					if (params.spiralize) { 
+						updateSplineOutline();
+						render();
+					}
+
+				} );
+				prs.add( params, 'line_width' , 0.0, 3.0 ).name( 'Line Width' ).step(0.1).onChange( function ( value ) {
+
+					//	splines.uniform.tension = value;
+						if (params.spiralize) { 
+							updateSplineOutline();
+							render();
+						}
+
+					} );
+				function scaleChanged() {
+					if (params.spiralize) {
+						updateSplineOutline();
+						render();
+					}
+				}
+				prs.add( params, 'set_height' ).name( 'Set height manually' ).onChange( scaleChanged );
+				prs.add( params, 'target_height', 10.0, 250.0 ).name( 'Height (mm)' ).step( 1.0 ).onChange( scaleChanged );
+				prs.close();
+				gui.close();
+
+				/*******
+				 * Curves
+				 *********/
+
+				for ( let i = 0; i < splinePointsLength; i ++ ) {
+
+					addSplineObject( positions[ i ] );
+
+				}
+
+				positions.length = 0;
+
+				for ( let i = 0; i < splinePointsLength; i ++ ) {
+
+					positions.push( splineHelperObjects[ i ].position );
+
+				}
+
+				const geometry = new THREE.BufferGeometry();
+				geometry.setAttribute( 'position', new THREE.BufferAttribute( new Float32Array( ARC_SEGMENTS * 3 ), 3 ) );
+
+				let curve = new THREE.CatmullRomCurve3( positions );
+				curve.curveType = 'catmullrom';
+				curve.mesh = new THREE.Line( geometry.clone(), new THREE.LineBasicMaterial( {
+					color: 0xff0000,
+					opacity: 0.35
+				} ) );
+				curve.mesh.castShadow = true;
+				splines.uniform = curve;
+
+				curve = new THREE.CatmullRomCurve3( positions );
+				curve.curveType = 'centripetal';
+				curve.mesh = new THREE.Line( geometry.clone(), new THREE.LineBasicMaterial( {
+					color: 0x00ff00,
+					opacity: 0.35
+				} ) );
+				curve.mesh.castShadow = true;
+				splines.centripetal = curve;
+
+				surface.spline = curve.clone();
+
+				let fn =  sor(curve, params.squash);
+				if (params.facet == true) { //log("faceting on", fn); 
+					fn = facet(sor(curve, params.squash), params.n_facets, params.twist , params.puff );  }
+				surface.geometry = new ParametricGeometry( fn , ARC_SEGMENTS, ANGLE_SEGMENTS );
+				surface.mesh = new THREE.Mesh( surface.geometry,  new THREE.MeshBasicMaterial( { color: 0x00ff00 } ) ); 
+
+				curve = new THREE.CatmullRomCurve3( positions );
+				curve.curveType = 'chordal';
+				curve.mesh = new THREE.Line( geometry.clone(), new THREE.LineBasicMaterial( {
+					color: 0x0000ff,
+					opacity: 0.35
+				} ) );
+				curve.mesh.castShadow = true;
+				splines.chordal = curve;
+
+
+				for ( const k in splines ) {
+
+					const spline = splines[ k ];
+					scene.add( spline.mesh );
+
+				}
+				scene.add( surface.mesh )
+				
+
+				load(
+					[new THREE.Vector3(289.76843686945404, 0, 0),
+					new THREE.Vector3(414.91846107193595, 191.8845958690277, 0),
+					new THREE.Vector3(449.8551731144292, 466.07527141050946, 0),
+					new THREE.Vector3(445.835534762008, 698.9204108718246, 0)]
+				);	
+			
+
+				// Controls
+				const controls = new OrbitControls( camera, renderer.domElement );
+				controls.damping = 0.2;
+				controls.addEventListener( 'change', render,  { passive: false } );
+
+				transformControl = new TransformControls( camera, renderer.domElement );
+				transformControl.showZ = false;
+				transformControl.addEventListener( 'change', render,  { passive: false } );
+				transformControl.addEventListener( 'dragging-changed', function ( event ) {
+
+					controls.enabled = ! event.value;
+
+				},  { passive: false } );
+				scene.add( transformControl );
+				//transformControl.update();
+
+				transformControl.addEventListener( 'objectChange', function () {
+
+					updateSplineOutline();
+
+				} );
+				controls.update();
+
+				document.addEventListener( 'pointerdown', onPointerDown );
+				document.addEventListener( 'pointerup', onPointerUp );
+				document.addEventListener( 'pointermove', onPointerMove );
+				window.addEventListener( 'resize', onWindowResize );
+
+				var rgbl = new RGBELoader()
+					.setPath( 'textures/' )
+//					.load( 'quarry_01_1k.hdr', function ( texture ) {
+					.load( 'venice_sunset_1k.hdr', function ( texture ) {
+						texture.mapping = THREE.EquirectangularReflectionMapping;
+						scene.background = texture;
+						scene.environment = texture;
+					} ) ;
+				console.log(rgbl)
+
+				render();
+
+				rgbl.needsPMREMUpdate = true
+
+				//controls.update();
+				//renderer.render( scene, camera );
+
+
+			}
+
+			function addSplineObject( position ) {
+
+//				const material = new THREE.MeshLambertMaterial( { color: Math.random() * 0xffffff } );
+				const object = new THREE.Mesh( geometry, splineHelperObjects.length==0 ? handle_material1 : handle_material );
+
+				if ( position ) {
+
+					object.position.copy( position );
+
+				} else {
+
+					var maxy = splineHelperObjects.map( x => x.position.y ).reduce(
+					(acc,val)=>{ if (val>acc) {return val} else {return acc} }, -100000.0
+				    );
+
+					object.position.x = Math.random() * 400 + 100;
+					object.position.y = 1.1*maxy;
+					object.position.z = 0.0;
+
+				}
+
+				object.castShadow = true;
+				object.receiveShadow = true;
+				scene.add( object );
+				splineHelperObjects.push( object );
+				return object;
+
+			}
+
+			function addPoint() {
+
+				splinePointsLength ++;
+
+				positions.push( addSplineObject().position );
+
+				updateSplineOutline();
+
+				render();
+
+			}
+
+			function removePoint() {
+
+				if ( splinePointsLength <= 4 ) {
+
+					return;
+
+				}
+
+				const point = splineHelperObjects.pop();
+				splinePointsLength --;
+				positions.pop();
+
+				if ( transformControl.object === point ) transformControl.detach();
+				scene.remove( point );
+
+				updateSplineOutline();
+
+				render();
+
+			}
+
+			function enforceFirstPointBottom() {
+
+				var firstY = splineHelperObjects[0].position.y
+				
+				for (const si in splineHelperObjects) {
+					var s = splineHelperObjects[si]
+					s.position.y = Math.max(firstY,s.position.y)
+				}
+			}
+
+			function updateSplineOutline() {
+				
+
+				for ( const k in splines ) {
+
+					const spline = splines[ k ];
+
+					const splineMesh = spline.mesh;
+					const position = splineMesh.geometry.attributes.position;
+
+					for ( let i = 0; i < ARC_SEGMENTS; i ++ ) {
+
+						const t = i / ( ARC_SEGMENTS - 1 );
+						spline.getPoint( t, point );
+						position.setXYZ( i, point.x, point.y, point.z );
+
+					}
+
+					position.needsUpdate = true;
+
+				}
+
+				scene.remove(surface.mesh);
+				surface.spline = splines.centripetal;//['centripital'];
+				//console.log( "spline:", surface.spline );
+
+
+				let fn =  sor(surface.spline, params.squash);
+				if (params.facet == true) { 
+					//log("faceting on: ", fn); 
+					fn = facet(sor(surface.spline, params.squash), params.n_facets, params.twist, params.puff  ) ;
+					//log("faceting on:- ", fn); 
+
+				}
+				//surface.geometry = new ParametricGeometry( fn , ARC_SEGMENTS, ANGLE_SEGMENTS );
+
+				surface.geometry = new ParametricGeometry( fn , ARC_SEGMENTS, ANGLE_SEGMENTS );
+				surface.mesh = new THREE.Mesh( surface.geometry, surface_material ); 
+
+				surface.mesh.receiveShadow = true;
+
+
+
+				if (params.bottom == true) {
+					var p0 = new THREE.Vector3(0,0,0)
+					fn(0,0,p0)
+					p0.x = 0.0 
+					p0.z = 0.0
+					const n = 100 
+					const ds = 1.0/n
+					var points = [...Array(n).keys()].map( function(x){ var p = new THREE.Vector3(0,0,0); fn(0,x*ds,p);  return p } )
+					var positions = [...Array(n).keys()].flatMap( function(i){//
+						return [ p0, points[i], points[(i+1)%n] ]
+					} ) //.flatMap( p => [p.x,p.y,p.z])
+
+					var bgeom = new THREE.BufferGeometry().setFromPoints( positions )
+					bgeom.computeVertexNormals();
+					var bottom = new THREE.Mesh( bgeom ); 
+			//		console.log(bottom_material)
+				//	bottom.material.color.setHex(0xaaaaaa); 
+				
+					bottom.material = //.color.setHex(0xffff00); // = bottom_material
+						new THREE.MeshStandardMaterial( { 	
+						color: 0xaaaaaa,
+						roughness: 1.0,
+						metalness: 0.0 } 
+					);
+					bottom.material.side = THREE.DoubleSide;
+					bottom.receiveShadow = true;
+					bottom.material.needsUpdate=true
+					surface.mesh.add(bottom)
+
+				}
+
+				scene.add(surface.mesh);
+
+				if (params.spiralize) {
+					const line_material = new THREE.LineBasicMaterial( { color: 0x0000ff } );
+
+					const sppoints = spiralPath( scale_factor() )
+					var line_geometry = new THREE.BufferGeometry().setFromPoints( sppoints );
+					//points3D.vertices.push(sppoints)
+					//var spiral = new THREE.Geometry();
+					const line = new THREE.Line( line_geometry, line_material );
+					//var line2 = new THREE.Line(points3D, new THREE.LineBasicMaterial({color: "red"}));
+					surface.mesh.add(line);
+
+
+				}
+
+				renderer.render( scene, camera );
+			//	bbox()
+
+
+			}
+
+			function model_json() {
+				const strplace = [];
+
+				for ( let i = 0; i < splinePointsLength; i ++ ) {
+
+					const p = splineHelperObjects[ i ].position;
+					strplace.push( `new THREE.Vector3(${p.x}, ${p.y}, ${p.z})` );
+
+				}
+
+				//console.log( strplace.join( ',\n' ) );
+				//const code = '[' + ( strplace.join( ',\n\t' ) ) + ']';
+				let ppp = {};
+				ppp.facet = params.facet;
+				ppp.n_facets = params.n_facets;
+				ppp.points = splineHelperObjects.map( x => ({ x: x.position.x , y: x.position.y }) ) ;
+				ppp.puff = params.puff;
+				ppp.squash = params.squash;
+				ppp.twist = params.twist;
+				ppp.texture = params.texture;
+				ppp.texture_amplitude = params.texture_amplitude;
+				ppp.texture_periods = params.texture_periods;
+				ppp.texture_fraction = params.texture_fraction;
+				ppp.set_height = params.set_height;
+				ppp.target_height = params.target_height;
+				ppp.npoints = ppp.points.length;
+				return JSON.stringify( ppp )
+			}
+
+
+			function load( new_positions ) {
+
+				while ( new_positions.length > positions.length ) {
+
+					addPoint();
+
+				}
+
+				while ( new_positions.length < positions.length ) {
+
+					removePoint();
+
+				}
+
+				for ( let i = 0; i < positions.length; i ++ ) {
+
+					positions[ i ].copy( new_positions[ i ] );
+
+				}
+
+				updateSplineOutline();
+
+			}
+
+			function render() {
+				splines.uniform.mesh.visible = params.uniform;
+				splines.centripetal.mesh.visible = params.centripetal;
+				splines.chordal.mesh.visible = params.chordal;
+				renderer.render( scene, camera );
+			}
+
+			function onPointerDown( event ) {
+				onDownPosition.x = event.clientX;
+				onDownPosition.y = event.clientY;
+
+				pointer.x = ( event.clientX / window.innerWidth ) * 2 - 1;
+				pointer.y = - ( event.clientY / window.innerHeight ) * 2 + 1;
+
+				//	log("pointerdown",[onDownPosition,pointer])
+				/*
+					console.log("maxy:", splineHelperObjects.map( x => x.position.y ).reduce(
+						(acc,val)=>{ if (val>acc) {return val} else {return acc} }, -100000.0
+					) )
+				*/
+				raycaster.setFromCamera( pointer, camera );
+
+				const intersects = raycaster.intersectObjects( splineHelperObjects, false );
+
+				if ( intersects.length > 0 ) {
+				//	log("intersection",intersects[ 0 ].object)
+
+					const object = intersects[ 0 ].object;
+
+					if ( object !== transformControl.object ) {
+
+						transformControl.attach( object );
+
+					}
+
+				}
+
+
+			}
+
+			function onPointerUp() {
+			//	log("pointerup",event)
+
+				onUpPosition.x = event.clientX;
+				onUpPosition.y = event.clientY;
+
+				//if ( onDownPosition.distanceTo( onUpPosition ) === 0 ) transformControl.detach();
+			//	console.log(params)
+	//			console.log( splineHelperObjects.map( x => ({ x: x.position.x , y: x.position.y }) ) )
+			}
+
+			function onPointerMove( event ) {
+
+			//	log("pointermove",event)
+				pointer.x = ( event.clientX / window.innerWidth ) * 2 - 1;
+				pointer.y = - ( event.clientY / window.innerHeight ) * 2 + 1;
+
+				enforceFirstPointBottom()
+			}
+
+			function onWindowResize() {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+
+				renderer.setSize( window.innerWidth, window.innerHeight );
+
+				render();
+
+			}
+
+		//	updateSplineOutline();
+
+	//		render();
+
+		</script>
+
+	</body>
+</html>

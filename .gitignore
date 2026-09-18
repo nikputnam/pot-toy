@@ -1,0 +1,4 @@
+.DS_Store
+*.gcode
+*.obj
+node_modules/
