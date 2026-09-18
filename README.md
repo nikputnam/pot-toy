@@ -5,7 +5,8 @@ browser. Drag control points on a profile curve, revolve it into a pot, add
 facets, twist, squash or a sine-wave surface texture, and export a spiral
 G-code toolpath.
 
-Live version: http://www.randomvariables.studio
+Live version: https://nikputnam.github.io/pot-toy/ (published automatically from
+the `main` branch by GitHub Pages). Also at http://www.randomvariables.studio.
 
 ## Run it
 
