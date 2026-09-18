@@ -5,7 +5,7 @@ browser. Drag control points on a profile curve, revolve it into a pot, add
 facets, twist, squash or a sine-wave surface texture, and export a spiral
 G-code toolpath.
 
-Live version: https://www.randomvariables.studio
+Live version: http://www.randomvariables.studio
 
 ## Run it
 
