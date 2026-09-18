@@ -37,6 +37,21 @@
 
 		<script type="module">
 
+			/*
+			 * pot toy: the whole app lives in this one module. See CLAUDE.md for
+			 * a guide. Rough map, top to bottom:
+			 *
+			 *   params                    every user setting and its default
+			 *   sor(), facet()            the pot surface as a parametric function fn(u, v, pt)
+			 *   bbox(), scale_factor()    size of the pot and scene-units-to-mm scale for export
+			 *   bottomRaster(), bottomPath(), spiralPath()   the printer toolpath
+			 *   exportGcode(), exportToObj(), exportJson()   file exports
+			 *   init()                    scene, camera, lights, the GUI panel, control points
+			 *   updateSplineOutline()     rebuilds the mesh (and toolpath preview) after any change
+			 *   render()                  draws a frame; rendering is on demand
+			 *   pointer handlers          dragging the red control-point spheres
+			 */
+
 			import * as THREE from 'three';
 
 			import { GUI } from './vendor/lil-gui/lil-gui.module.min.js';

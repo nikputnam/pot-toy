@@ -32,8 +32,9 @@ not work. Any recent Chrome, Firefox or Safari is fine.
   the phase between successive turns of the spiral. It shows only in the
   toolpath preview and the G-code, not on the shaded surface.
 - **Show spiral toolpath** draws the path the printer will follow.
-- **Export** writes OBJ, JSON (the control points and settings, loadable back
-  into the app), or G-code.
+- **Export** writes OBJ, JSON (a record of the control points and settings;
+  the same record is written as a comment at the top of the G-code), or
+  G-code.
 - **(Expert) Printer Settings** sets bed height, layer height, line width,
   and optionally a fixed printed height instead of the default autoscale.
 
@@ -47,11 +48,45 @@ scaled to fit within a 100 mm box. The header and footer at the bottom of
 check them against your machine before printing. `;LAYER_CHANGE` markers are
 emitted so slicers such as PrusaSlicer can preview the file by layer.
 
+## Modifying it, with or without an AI assistant
+
+The whole app is one file, `index.html`, and every option follows the same
+small pattern, so it is a friendly place to try changes. `CLAUDE.md` in the
+repo root is a guide written for AI coding assistants such as Claude Code
+and Claude Desktop, and it is just as useful for people: it explains how the
+code is organized, the units, the recipe for adding a new slider or option,
+and how to check that a change worked.
+
+If you are asking an assistant to make a change for you, a prompt like this
+works well:
+
+> Help me run this project locally, then modify it: add an optional mode,
+> off by default, where a slider sets the diameter of the top opening of the
+> pot. Read CLAUDE.md first. Show me the running app before and after.
+>
+> https://github.com/nikputnam/pot-toy
+
+Tips that make this go smoothly:
+
+- Fork the repo on GitHub first, so the assistant can clone your copy and
+  you can keep your changes.
+- Ask it to run the app and show you it working before it changes anything.
+- Be specific about defaults. "Off by default" or "should not change the
+  current behavior unless the checkbox is on" is what keeps existing
+  projects printing the same.
+- Ask it to turn on "Show spiral toolpath" after the change, so you can see
+  the printer path agrees with the pot.
+- If the page goes blank, ask it to open the browser console and read the
+  error. A single typo in `index.html` stops the whole page.
+- The app needs a local web server (the assistant will start one). Opening
+  `index.html` directly from a folder does not work.
+
 ## Layout
 
 ```
 index.html    the whole app: page, styles, and the script
 main.css      shared page styles
+CLAUDE.md     guide to the code for AI assistants and humans
 textures/     HDR environment map for the preview lighting
 vendor/       three.js and lil-gui, copied unmodified; see vendor/README.md
 ```
