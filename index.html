@@ -1165,6 +1165,20 @@ G1 F3360
 
 				surface.geometry = new ParametricGeometry( fn , ARC_SEGMENTS, ANGLE_SEGMENTS );
 
+				// replace ParametricGeometry's (u,v) texture coordinates with conformal ones:
+				// x = angle around the pot in turns, y = conformal height U in the same units,
+				// so the map keeps its true aspect ratio (y is not normalized to 0..1).
+				// These go out in the OBJ export as vt lines.
+				const conformalU = conformalMap( surface.spline, params.squash )
+				const uv = surface.geometry.attributes.uv
+				const uv_twist = (params.facet == true) ? params.twist : 0.0
+				for ( let i = 0; i < uv.count; i ++ ) {
+					const u = uv.getX(i)
+					const v = uv.getY(i)
+					uv.setXY( i, v + u*uv_twist, conformalU(u) )
+				}
+				uv.needsUpdate = true
+
 				surface.mesh = new THREE.Mesh( surface.geometry, surface_material );
 
 				surface.mesh.receiveShadow = true;
