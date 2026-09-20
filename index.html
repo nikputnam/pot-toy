@@ -121,7 +121,11 @@
 				texture_amplitude: 1.0,
 				texture_periods: 12,
 				texture_fraction: 0.0,
-				texture_conformal: false
+				texture_conformal: false,
+
+				surface_image: false,
+				image_repeat: 8,
+				loadImage: loadImage
 
 			};
 
@@ -138,6 +142,65 @@
 					metalness: 0.0 } 
 					);
 			surface_material.side = THREE.DoubleSide;
+
+			// Surface image: a preview-only texture mapped through the conformal uv
+			// coordinates set in updateSplineOutline(). uv.x and uv.y are both in turns, so
+			// repeating the image the same number of times in both keeps it undistorted.
+			// Until the user loads an image, a generated checkerboard is used.
+			let surface_image = null
+			let surface_image_controller = null
+
+			function checkerTexture() {
+				const c = document.createElement( 'canvas' )
+				c.width = 64
+				c.height = 64
+				const ctx = c.getContext( '2d' )
+				ctx.fillStyle = '#eeeeee'
+				ctx.fillRect( 0, 0, 64, 64 )
+				ctx.fillStyle = '#444444'
+				ctx.fillRect( 0, 0, 32, 32 )
+				ctx.fillRect( 32, 32, 32, 32 )
+				return new THREE.CanvasTexture( c )
+			}
+
+			function updateSurfaceImage() {
+				if (params.surface_image) {
+					if (surface_image === null) { surface_image = checkerTexture() }
+					surface_image.wrapS = THREE.RepeatWrapping
+					surface_image.wrapT = THREE.RepeatWrapping
+					// keep the image's aspect ratio: a wide image covers fewer turns vertically
+					const img = surface_image.image
+					const aspect = (img && img.width > 0 && img.height > 0) ? img.width/img.height : 1.0
+					surface_image.repeat.set( params.image_repeat, params.image_repeat*aspect )
+					surface_material.map = surface_image
+					surface_material.color.setHex( 0xffffff )
+				} else {
+					surface_material.map = null
+					surface_material.color.setHex( 0xaaaaaa )
+				}
+				surface_material.needsUpdate = true
+			}
+
+			function loadImage() {
+				const input = document.createElement( 'input' )
+				input.type = 'file'
+				input.accept = 'image/*'
+				input.onchange = function() {
+					if (input.files.length == 0) { return }
+					const url = URL.createObjectURL( input.files[0] )
+					new THREE.TextureLoader().load( url, function( texture ) {
+						URL.revokeObjectURL( url )
+						if (surface_image !== null) { surface_image.dispose() }
+						surface_image = texture
+						// loading an image turns the display on
+						params.surface_image = true
+						if (surface_image_controller !== null) { surface_image_controller.updateDisplay() }
+						updateSurfaceImage()
+						render()
+					} )
+				}
+				input.click()
+			}
 
 			const bottom_material = new THREE.MeshStandardMaterial( { 	
 					color: 0x00aaaa,
@@ -893,6 +956,13 @@ G1 F3360
 				tex.add( params, 'texture_periods', 0, 60 ).name( 'Periods per turn' ).step( 1 ).onChange( textureChanged );
 				tex.add( params, 'texture_fraction', 0.0, 1.0 ).name( 'Fractional periods' ).step( 0.01 ).onChange( textureChanged );
 				tex.add( params, 'texture_conformal' ).name( 'Square cells (conformal)' ).onChange( textureChanged );
+				function imageChanged() {
+					updateSurfaceImage();
+					render();
+				}
+				surface_image_controller = tex.add( params, 'surface_image' ).name( 'Show image on surface' ).onChange( imageChanged );
+				tex.add( params, 'image_repeat', 1, 40 ).name( 'Image repeats per turn' ).step( 1 ).onChange( imageChanged );
+				tex.add( params, 'loadImage' ).name( 'Load image...' );
 				tex.close();
 
 				let h = gui.addFolder( 'Export' );
@@ -1262,6 +1332,8 @@ G1 F3360
 				ppp.texture_periods = params.texture_periods;
 				ppp.texture_fraction = params.texture_fraction;
 				ppp.texture_conformal = params.texture_conformal;
+				ppp.surface_image = params.surface_image;
+				ppp.image_repeat = params.image_repeat;
 				ppp.set_height = params.set_height;
 				ppp.target_height = params.target_height;
 				ppp.npoints = ppp.points.length;
