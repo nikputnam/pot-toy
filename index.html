@@ -120,7 +120,8 @@
 				texture: false,
 				texture_amplitude: 1.0,
 				texture_periods: 12,
-				texture_fraction: 0.0
+				texture_fraction: 0.0,
+				texture_conformal: false
 
 			};
 
@@ -455,8 +456,38 @@
 
 			}
 
+			// Closed-form conformal map for a surface of revolution. Returns U(u), the
+			// conformal height coordinate in turns: U = (1/2pi) * integral of ds / r along
+			// the profile (a Mercator-style map). A pattern with the same number of
+			// periods in U as in v (turns around the pot) has square cells everywhere.
+			// squash is handled approximately by using the radius of the circle with the
+			// same circumference as the ellipse; facets are ignored.
+			function conformalMap( spline, squash ) {
+
+				const n = 400
+				const pts = [...Array(n+1).keys()].map( i => spline.getPoint( i/n ).clone() )
+				const rmax = pts.reduce( (a,p) => Math.max(a,Math.abs(p.x)), 0.0 )
+				// r goes to zero if the first control point is on the axis; clamp so the integral stays finite
+				const rmin = 0.01*rmax
+				// Ramanujan's approximation to the ellipse circumference, over 2 pi r
+				const rfact = ( 3.0*(1.0+squash) - Math.sqrt( (3.0+squash)*(1.0+3.0*squash) ) ) / 2.0
+
+				const U = [0.0]
+				for (let i = 1; i <= n; i++) {
+					const ds = pts[i].distanceTo( pts[i-1] )
+					const r = Math.max( rmin, rfact*0.5*( Math.abs(pts[i].x) + Math.abs(pts[i-1].x) ) )
+					U.push( U[i-1] + ds/(2.0*Math.PI*r) )
+				}
+
+				return function(u) {
+					const x = Math.min( Math.max(u,0.0), 1.0 ) * n
+					const i = Math.min( Math.floor(x), n-1 )
+					return U[i] + (x-i)*( U[i+1] - U[i] )
+				}
+			}
+
 			function spiralPath(scale_fact) {
-				
+
 				const length_samples = surface.spline.points.length * 10
 				const dt = 1.0/(length_samples-1)
 				//console.log("dt=",dt)
@@ -509,6 +540,9 @@
 				const texture_on = params.texture && params.texture_amplitude > 0.0
 				const texture_periods = params.texture_periods + params.texture_fraction
 				const texture_amp = params.texture_amplitude / scale_fact
+				// conformal option: modulate the wave by the same number of periods in the
+				// conformal height coordinate U, giving a grid of square bumps.
+				const conformalU = (texture_on && params.texture_conformal) ? conformalMap( surface.spline, params.squash ) : null
 
 				var points = tv.map( function(t) {
 					var v = i*da - params.twist*t 
@@ -519,7 +553,8 @@
 					if (texture_on) {
 						const r = Math.sqrt( p.x*p.x + p.z*p.z )
 						if (r > 0.0) {
-							const s = texture_amp * Math.sin( 2.0*Math.PI * texture_periods * v )
+							let s = texture_amp * Math.sin( 2.0*Math.PI * texture_periods * v )
+							if (conformalU) { s *= Math.sin( 2.0*Math.PI * texture_periods * conformalU(u) ) }
 							const rs = Math.max( 0.0, r + s ) / r
 							p.x *= rs
 							p.z *= rs
@@ -857,6 +892,7 @@ G1 F3360
 				tex.add( params, 'texture_amplitude', 0.0, 5.0 ).name( 'Amplitude (mm)' ).step( 0.1 ).onChange( textureChanged );
 				tex.add( params, 'texture_periods', 0, 60 ).name( 'Periods per turn' ).step( 1 ).onChange( textureChanged );
 				tex.add( params, 'texture_fraction', 0.0, 1.0 ).name( 'Fractional periods' ).step( 0.01 ).onChange( textureChanged );
+				tex.add( params, 'texture_conformal' ).name( 'Square cells (conformal)' ).onChange( textureChanged );
 				tex.close();
 
 				let h = gui.addFolder( 'Export' );
@@ -1128,7 +1164,8 @@ G1 F3360
 				//surface.geometry = new ParametricGeometry( fn , ARC_SEGMENTS, ANGLE_SEGMENTS );
 
 				surface.geometry = new ParametricGeometry( fn , ARC_SEGMENTS, ANGLE_SEGMENTS );
-				surface.mesh = new THREE.Mesh( surface.geometry, surface_material ); 
+
+				surface.mesh = new THREE.Mesh( surface.geometry, surface_material );
 
 				surface.mesh.receiveShadow = true;
 
@@ -1210,6 +1247,7 @@ G1 F3360
 				ppp.texture_amplitude = params.texture_amplitude;
 				ppp.texture_periods = params.texture_periods;
 				ppp.texture_fraction = params.texture_fraction;
+				ppp.texture_conformal = params.texture_conformal;
 				ppp.set_height = params.set_height;
 				ppp.target_height = params.target_height;
 				ppp.npoints = ppp.points.length;
