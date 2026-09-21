@@ -68,6 +68,7 @@
 
 			let container;
 			let camera, scene, renderer;
+			let gui;
 			const splineHelperObjects = [];
 			let splinePointsLength = 4;
 			const positions = [];
@@ -107,6 +108,7 @@
 				exportJson: exportJson,
 				exportToObj: exportToObj,
 				exportGcode: exportGcode,
+				restoreGcode: restoreGcode,
 
 				max_height: 100.0,
 				max_width: 100.0,
@@ -999,6 +1001,71 @@ G1 F3360
 			}
 
 
+			// Every G-code export begins with a comment line holding model_json(), and the
+			// JSON export is that same record on its own. Reading either one back restores
+			// the pot so a printed shape can be edited and exported again.
+			function restoreGcode() {
+
+				const input = document.createElement( 'input' );
+				input.type = 'file';
+				input.accept = '.gcode,.gco,.json,.txt,text/plain';
+				input.onchange = function() {
+					if (input.files.length == 0) { return }
+					const reader = new FileReader();
+					reader.onload = function() { restoreFromText( String( reader.result ) ) };
+					reader.readAsText( input.files[0] );
+				};
+				input.click();
+
+			}
+
+			function restoreFromText( text ) {
+
+				const lines = text.split( /\r?\n/ );
+
+				// the record is the first line that parses as JSON, bare or behind a ';'
+				var model = null;
+				for ( const line of lines ) {
+					const s = line.replace( /^\s*;\s*/, '' ).trim();
+					if ( s.charAt(0) != '{' ) { continue }
+					try { model = JSON.parse( s ) } catch (e) { continue }
+					break;
+				}
+
+				if ( model === null || ! Array.isArray( model.points ) ) {
+					window.alert( "No pot toy model found in that file." );
+					return;
+				}
+				// load() removes points one at a time and removePoint() stops at four
+				if ( model.points.length < 4 ) {
+					window.alert( "That model has fewer than the four control points pot toy needs." );
+					return;
+				}
+
+				// only the fields the file actually carries, so a file written before an
+				// option existed leaves that option at its default
+				const fields = [ 'bottom', 'facet', 'n_facets', 'twist', 'squash', 'puff',
+					'texture', 'texture_amplitude', 'texture_periods', 'texture_fraction',
+					'texture_conformal', 'uv_lscm', 'surface_image', 'image_repeat',
+					'image_bump', 'image_bump_amplitude', 'set_height', 'target_height' ];
+				for ( const f of fields ) {
+					if ( model[ f ] !== undefined ) { params[ f ] = model[ f ] }
+				}
+
+				// the printer settings are separate comment lines in the G-code header
+				for ( const line of lines ) {
+					const m = line.match( /^\s*;\s*(bed_height|layer_height|line_width)\s*:\s*(-?[0-9.]+)\s*$/ );
+					if ( m ) { params[ m[1] ] = parseFloat( m[2] ) }
+				}
+
+				load( model.points.map( p => new THREE.Vector3( p.x, p.y, 0 ) ) );
+				updateSurfaceImage();
+				gui.controllersRecursive().forEach( c => c.updateDisplay() );
+				render();
+
+			}
+
+
 			function randomID(n) {
 				const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjklmnpqrstuvwxyz23456789".split("")
 				return [...Array(n).keys()].map( x => chars[ Math.floor(Math.random() * chars.length) ] ).reduce( (a,b)=>a+b , "")
@@ -1104,7 +1171,7 @@ G1 F3360
 //				renderer.shadowMap.enabled = true;
 				container.appendChild( renderer.domElement );
 
-				const gui = new GUI();
+				gui = new GUI();
 
 				gui.add( params, 'bottom' ).onChange( function ( value ) {
 					//splines.uniform.tension = value;
@@ -1207,6 +1274,7 @@ G1 F3360
 				h.add( params, 'exportToObj' ).name( 'Export OBJ' );
 				h.add( params, 'exportGcode' ).name( 'Export Gcode' );
 				h.add( params, 'exportJson' ).name( 'Export JSON' );
+				h.add( params, 'restoreGcode' ).name( 'Restore from Gcode' );
 				h.close()
 
 				let prs = gui.addFolder( '(Expert) Printer Settings' );
@@ -1557,6 +1625,7 @@ G1 F3360
 				//console.log( strplace.join( ',\n' ) );
 				//const code = '[' + ( strplace.join( ',\n\t' ) ) + ']';
 				let ppp = {};
+				ppp.bottom = params.bottom;
 				ppp.facet = params.facet;
 				ppp.n_facets = params.n_facets;
 				ppp.points = splineHelperObjects.map( x => ({ x: x.position.x , y: x.position.y }) ) ;
