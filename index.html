@@ -122,6 +122,7 @@
 				texture_periods: 12,
 				texture_fraction: 0.0,
 				texture_conformal: false,
+				uv_lscm: false,
 
 				surface_image: false,
 				image_repeat: 8,
@@ -549,6 +550,180 @@
 				}
 			}
 
+			// Least-squares conformal map (LSCM) of the surface fn(u,v,pt), for shapes where
+			// the closed form above is not conformal (squash, facets). Solved on a coarse
+			// nu x nv grid and interpolated, since conformal maps are smooth.
+			//
+			// Unknowns are (x,y) per grid vertex: x = turns around the pot, y = conformal
+			// height in the same units. The grid is periodic in v: column nv is column 0
+			// with x + 1, which is built into the equations (the +1 goes to the right hand
+			// side), so there is no seam and no seam constraint. That jump fixes the scale
+			// of the map; the boundary conditions further down fix the rest.
+			//
+			// Each triangle contributes two rows (real and imaginary part) of
+			//     sum_k W_k z_k / sqrt(2 area) = 0 ,   z = x + iy ,
+			// where W_k is the edge opposite corner k in the triangle's own flat 2D frame,
+			// as a complex number. The normal equations are assembled directly into a
+			// banded matrix and solved by banded Cholesky. Vertices are numbered ring by
+			// ring, with each ring folded (0, nv-1, 1, nv-2, ...) so that the periodic
+			// wrap does not widen the band.
+			//
+			// Returns function(u, v, out) that sets out.x, out.y.
+			function lscmMap( fn, nu, nv ) {
+
+				const nverts = (nu+1)*nv
+				const n = 2*nverts
+				const fold = j => ( 2*j < nv ) ? 2*j : 2*(nv-1-j) + 1
+				const vid = (i,j) => i*nv + fold(j)
+				const bw = 2*(nv+2) + 1   // half bandwidth
+				const w = bw+1
+
+				const P = []
+				for (let i = 0; i <= nu; i++) {
+					for (let j = 0; j < nv; j++) {
+						const p = new THREE.Vector3()
+						fn( i/nu, j/nv, p )
+						P.push( p )
+					}
+				}
+
+				// lower band storage: entry (r,c), r-bw <= c <= r, is at r*w + (c-r+bw)
+				const N = new Float64Array( n*w )
+				const rhs = new Float64Array( n )
+				const e1 = new THREE.Vector3()
+				const e2 = new THREE.Vector3()
+				const idx = [0,0,0,0,0,0]
+				const re = [0,0,0,0,0,0]
+				const im = [0,0,0,0,0,0]
+
+				// corners are [i,j] with j possibly equal to nv (the wrapped column)
+				function addTriangle( c0, c1, c2 ) {
+					const cs = [c0,c1,c2]
+					const p = cs.map( c => P[ c[0]*nv + (c[1]%nv) ] )
+					e1.subVectors( p[1], p[0] )
+					e2.subVectors( p[2], p[0] )
+					const l = e1.length()
+					if (!(l > 0.0)) { return }
+					const a = e2.dot(e1)/l
+					const b = Math.sqrt( Math.max( 0.0, e2.lengthSq() - a*a ) )
+					const area = 0.5*l*b
+					if (!(area > 1e-12*l*l)) { return }   // degenerate, e.g. bottom ring collapsed onto the axis
+					const s = 1.0/Math.sqrt( 2.0*area )
+					// local frame: p0=(0,0) p1=(l,0) p2=(a,b); W_k = opposite edge
+					const wr = [ (a-l)*s, -a*s, l*s ]
+					const wi = [ b*s, -b*s, 0.0 ]
+					let cre = 0.0, cim = 0.0
+					for (let k = 0; k < 3; k++) {
+						const v = vid( cs[k][0], cs[k][1]%nv )
+						idx[2*k] = 2*v ; idx[2*k+1] = 2*v+1
+						re[2*k] = wr[k] ; re[2*k+1] = -wi[k]
+						im[2*k] = wi[k] ; im[2*k+1] =  wr[k]
+						if (cs[k][1] == nv) { cre += wr[k] ; cim += wi[k] }   // x + 1 across the wrap
+					}
+					for (let q = 0; q < 6; q++) {
+						rhs[idx[q]] -= re[q]*cre + im[q]*cim
+						for (let r = 0; r < 6; r++) {
+							if (idx[r] <= idx[q]) { N[ idx[q]*w + (idx[r]-idx[q]+bw) ] += re[q]*re[r] + im[q]*im[r] }
+						}
+					}
+				}
+
+				for (let i = 0; i < nu; i++) {
+					for (let j = 0; j < nv; j++) {
+						addTriangle( [i,j], [i+1,j], [i+1,j+1] )
+						addTriangle( [i,j], [i+1,j+1], [i,j+1] )
+					}
+				}
+				// Boundary conditions. Conformality and the period alone leave the map far from
+				// unique (z + c*exp(2 pi i k z) is just as conformal for any c, k), which shows
+				// up as wavy rim and foot lines. The map onto a straight strip is unique: hold
+				// y = 0 on the bottom ring and y = (one free constant) on the top ring, with
+				// stiff penalties that stay inside the band. x(0,0) = 0 fixes the rotation.
+				const stiff = 1.0e4
+				N[ 0*w + bw ] += 1.0
+				for (let j = 0; j < nv; j++) {
+					const yb = 2*vid(0,j) + 1
+					N[ yb*w + bw ] += stiff
+					const ya = 2*vid(nu,j) + 1
+					const yc = 2*vid(nu,(j+1)%nv) + 1
+					const hi = Math.max(ya,yc), lo = Math.min(ya,yc)
+					N[ ya*w + bw ] += stiff
+					N[ yc*w + bw ] += stiff
+					N[ hi*w + (lo-hi+bw) ] -= stiff
+				}
+
+				// banded Cholesky, in place: N = L L^T
+				for (let r = 0; r < n; r++) {
+					const c0 = Math.max( 0, r-bw )
+					for (let c = c0; c <= r; c++) {
+						let sum = N[ r*w + (c-r+bw) ]
+						const m0 = Math.max( c0, c-bw )
+						for (let m = m0; m < c; m++) {
+							sum -= N[ r*w + (m-r+bw) ] * N[ c*w + (m-c+bw) ]
+						}
+						if (c == r) {
+							N[ r*w + bw ] = Math.sqrt( Math.max( sum, 1e-12 ) )
+						} else {
+							N[ r*w + (c-r+bw) ] = sum / N[ c*w + bw ]
+						}
+					}
+				}
+				// forward then back substitution
+				const z = rhs
+				for (let r = 0; r < n; r++) {
+					let sum = z[r]
+					for (let m = Math.max(0,r-bw); m < r; m++) { sum -= N[ r*w + (m-r+bw) ]*z[m] }
+					z[r] = sum / N[ r*w + bw ]
+				}
+				for (let r = n-1; r >= 0; r--) {
+					let sum = z[r]
+					for (let m = r+1; m <= Math.min(n-1,r+bw); m++) { sum -= N[ m*w + (r-m+bw) ]*z[m] }
+					z[r] = sum / N[ r*w + bw ]
+				}
+
+				// the orientation of the triangles decides whether y runs up or down the pot; make it up
+				const ysign = ( z[ 2*vid(nu,0)+1 ] < z[ 2*vid(0,0)+1 ] ) ? -1.0 : 1.0
+
+				return function( u, v, out ) {
+					const fi = Math.min( Math.max(u,0.0), 1.0 ) * nu
+					const i = Math.min( Math.floor(fi), nu-1 )
+					const fj = Math.min( Math.max(v,0.0), 1.0 ) * nv
+					const j = Math.min( Math.floor(fj), nv-1 )
+					const s = fi-i
+					const t = fj-j
+					const wrap = (j+1 == nv) ? 1.0 : 0.0
+					const k00 = 2*vid(i,j), k10 = 2*vid(i+1,j), k01 = 2*vid(i,(j+1)%nv), k11 = 2*vid(i+1,(j+1)%nv)
+					out.x = (1-s)*( (1-t)*z[k00] + t*(z[k01]+wrap) ) + s*( (1-t)*z[k10] + t*(z[k11]+wrap) )
+					out.y = ysign*( (1-s)*( (1-t)*z[k00+1] + t*z[k01+1] ) + s*( (1-t)*z[k10+1] + t*z[k11+1] ) )
+				}
+			}
+
+			const LSCM_U = 30
+			const LSCM_V = 48
+
+			// The conformal uv map of the current pot, as function(u, v, out) setting out.x
+			// (turns around) and out.y (conformal height, same units). v must be in 0..1.
+			// Closed form by default; LSCM when params.uv_lscm is on.
+			function surfaceUV() {
+				if (params.uv_lscm) {
+					let fn = sor(surface.spline, params.squash);
+					let nv = LSCM_V
+					if (params.facet == true) {
+						fn = facet(sor(surface.spline, params.squash), params.n_facets, params.twist, params.puff  ) ;
+						// put grid columns on the facet edges
+						nv = params.n_facets * Math.ceil( LSCM_V/params.n_facets )
+					}
+					return lscmMap( fn, LSCM_U, nv )
+				}
+				const U = conformalMap( surface.spline, params.squash )
+				// with facets on, facet() puts the point at angle v + u*twist
+				const tw = (params.facet == true) ? params.twist : 0.0
+				return function( u, v, out ) {
+					out.x = v + u*tw
+					out.y = U(u)
+				}
+			}
+
 			function spiralPath(scale_fact) {
 
 				const length_samples = surface.spline.points.length * 10
@@ -603,9 +778,10 @@
 				const texture_on = params.texture && params.texture_amplitude > 0.0
 				const texture_periods = params.texture_periods + params.texture_fraction
 				const texture_amp = params.texture_amplitude / scale_fact
-				// conformal option: modulate the wave by the same number of periods in the
-				// conformal height coordinate U, giving a grid of square bumps.
-				const conformalU = (texture_on && params.texture_conformal) ? conformalMap( surface.spline, params.squash ) : null
+				// conformal option: take both coordinates from the conformal uv map and use the
+				// same number of periods in each, giving a grid of square bumps.
+				const uvmap = (texture_on && params.texture_conformal) ? surfaceUV() : null
+				const uvpt = new THREE.Vector2()
 
 				var points = tv.map( function(t) {
 					var v = i*da - params.twist*t 
@@ -616,8 +792,15 @@
 					if (texture_on) {
 						const r = Math.sqrt( p.x*p.x + p.z*p.z )
 						if (r > 0.0) {
-							let s = texture_amp * Math.sin( 2.0*Math.PI * texture_periods * v )
-							if (conformalU) { s *= Math.sin( 2.0*Math.PI * texture_periods * conformalU(u) ) }
+							let s = 0.0
+							if (uvmap) {
+								// the map wants v in 0..1; add the whole turns back so v stays unwrapped
+								const vm = v - Math.floor(v)
+								uvmap( u, vm, uvpt )
+								s = texture_amp * Math.sin( 2.0*Math.PI * texture_periods * ( uvpt.x + (v-vm) ) ) * Math.sin( 2.0*Math.PI * texture_periods * uvpt.y )
+							} else {
+								s = texture_amp * Math.sin( 2.0*Math.PI * texture_periods * v )
+							}
 							const rs = Math.max( 0.0, r + s ) / r
 							p.x *= rs
 							p.z *= rs
@@ -956,6 +1139,10 @@ G1 F3360
 				tex.add( params, 'texture_periods', 0, 60 ).name( 'Periods per turn' ).step( 1 ).onChange( textureChanged );
 				tex.add( params, 'texture_fraction', 0.0, 1.0 ).name( 'Fractional periods' ).step( 0.01 ).onChange( textureChanged );
 				tex.add( params, 'texture_conformal' ).name( 'Square cells (conformal)' ).onChange( textureChanged );
+				tex.add( params, 'uv_lscm' ).name( 'LSCM uv map (squash, facets)' ).onChange( function() {
+					updateSplineOutline();
+					render();
+				} );
 				function imageChanged() {
 					updateSurfaceImage();
 					render();
@@ -1239,13 +1426,12 @@ G1 F3360
 				// x = angle around the pot in turns, y = conformal height U in the same units,
 				// so the map keeps its true aspect ratio (y is not normalized to 0..1).
 				// These go out in the OBJ export as vt lines.
-				const conformalU = conformalMap( surface.spline, params.squash )
+				const uvmap = surfaceUV()
+				const uvpt = new THREE.Vector2()
 				const uv = surface.geometry.attributes.uv
-				const uv_twist = (params.facet == true) ? params.twist : 0.0
 				for ( let i = 0; i < uv.count; i ++ ) {
-					const u = uv.getX(i)
-					const v = uv.getY(i)
-					uv.setXY( i, v + u*uv_twist, conformalU(u) )
+					uvmap( uv.getX(i), uv.getY(i), uvpt )
+					uv.setXY( i, uvpt.x, uvpt.y )
 				}
 				uv.needsUpdate = true
 
@@ -1332,6 +1518,7 @@ G1 F3360
 				ppp.texture_periods = params.texture_periods;
 				ppp.texture_fraction = params.texture_fraction;
 				ppp.texture_conformal = params.texture_conformal;
+				ppp.uv_lscm = params.uv_lscm;
 				ppp.surface_image = params.surface_image;
 				ppp.image_repeat = params.image_repeat;
 				ppp.set_height = params.set_height;
