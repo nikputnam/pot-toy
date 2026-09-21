@@ -126,6 +126,11 @@
 
 				surface_image: false,
 				image_repeat: 8,
+
+				scale_view: 'off',
+				cone_order: 4,
+				uv_cones: false,
+				scale_stats: '',
 				loadImage: loadImage
 
 			};
@@ -150,6 +155,7 @@
 			// Until the user loads an image, a generated checkerboard is used.
 			let surface_image = null
 			let surface_image_controller = null
+			let scale_stats_controller = null
 
 			function checkerTexture() {
 				const c = document.createElement( 'canvas' )
@@ -165,7 +171,13 @@
 			}
 
 			function updateSurfaceImage() {
-				if (params.surface_image) {
+				surface_material.vertexColors = (params.scale_view != 'off')
+				surface_material.toneMapped = (params.scale_view == 'off')   // keep the heat map colours true
+				if (params.scale_view != 'off') {
+					// the pattern size heat map (vertex colours) takes over from the image
+					surface_material.map = null
+					surface_material.color.setHex( 0xffffff )
+				} else if (params.surface_image) {
 					if (surface_image === null) { surface_image = checkerTexture() }
 					surface_image.wrapS = THREE.RepeatWrapping
 					surface_image.wrapT = THREE.RepeatWrapping
@@ -550,6 +562,50 @@
 				}
 			}
 
+			// Solve N z = rhs for a symmetric positive definite banded matrix, by banded
+			// Cholesky (N = L L^T, in place) then forward and back substitution.
+			// Storage is the lower band: entry (r,c), r-bw <= c <= r, is at r*(bw+1) + (c-r+bw).
+			// N and rhs are overwritten; rhs is returned holding the solution.
+			function bandedSolve( N, rhs, n, bw ) {
+				bandedFactor( N, n, bw )
+				return bandedSubstitute( N, rhs, n, bw )
+			}
+
+			function bandedFactor( N, n, bw ) {
+				const w = bw+1
+				for (let r = 0; r < n; r++) {
+					const c0 = Math.max( 0, r-bw )
+					for (let c = c0; c <= r; c++) {
+						let sum = N[ r*w + (c-r+bw) ]
+						for (let m = c0; m < c; m++) {
+							sum -= N[ r*w + (m-r+bw) ] * N[ c*w + (m-c+bw) ]
+						}
+						if (c == r) {
+							N[ r*w + bw ] = Math.sqrt( Math.max( sum, 1e-12 ) )
+						} else {
+							N[ r*w + (c-r+bw) ] = sum / N[ c*w + bw ]
+						}
+					}
+				}
+			}
+
+			// N must already be factored by bandedFactor
+			function bandedSubstitute( N, rhs, n, bw ) {
+				const w = bw+1
+				const z = rhs
+				for (let r = 0; r < n; r++) {
+					let sum = z[r]
+					for (let m = Math.max(0,r-bw); m < r; m++) { sum -= N[ r*w + (m-r+bw) ]*z[m] }
+					z[r] = sum / N[ r*w + bw ]
+				}
+				for (let r = n-1; r >= 0; r--) {
+					let sum = z[r]
+					for (let m = r+1; m <= Math.min(n-1,r+bw); m++) { sum -= N[ m*w + (r-m+bw) ]*z[m] }
+					z[r] = sum / N[ r*w + bw ]
+				}
+				return z
+			}
+
 			// Least-squares conformal map (LSCM) of the surface fn(u,v,pt), for shapes where
 			// the closed form above is not conformal (squash, facets). Solved on a coarse
 			// nu x nv grid and interpolated, since conformal maps are smooth.
@@ -652,34 +708,7 @@
 					N[ hi*w + (lo-hi+bw) ] -= stiff
 				}
 
-				// banded Cholesky, in place: N = L L^T
-				for (let r = 0; r < n; r++) {
-					const c0 = Math.max( 0, r-bw )
-					for (let c = c0; c <= r; c++) {
-						let sum = N[ r*w + (c-r+bw) ]
-						const m0 = Math.max( c0, c-bw )
-						for (let m = m0; m < c; m++) {
-							sum -= N[ r*w + (m-r+bw) ] * N[ c*w + (m-c+bw) ]
-						}
-						if (c == r) {
-							N[ r*w + bw ] = Math.sqrt( Math.max( sum, 1e-12 ) )
-						} else {
-							N[ r*w + (c-r+bw) ] = sum / N[ c*w + bw ]
-						}
-					}
-				}
-				// forward then back substitution
-				const z = rhs
-				for (let r = 0; r < n; r++) {
-					let sum = z[r]
-					for (let m = Math.max(0,r-bw); m < r; m++) { sum -= N[ r*w + (m-r+bw) ]*z[m] }
-					z[r] = sum / N[ r*w + bw ]
-				}
-				for (let r = n-1; r >= 0; r--) {
-					let sum = z[r]
-					for (let m = r+1; m <= Math.min(n-1,r+bw); m++) { sum -= N[ m*w + (r-m+bw) ]*z[m] }
-					z[r] = sum / N[ r*w + bw ]
-				}
+				const z = bandedSolve( N, rhs, n, bw )
 
 				// the orientation of the triangles decides whether y runs up or down the pot; make it up
 				const ysign = ( z[ 2*vid(nu,0)+1 ] < z[ 2*vid(0,0)+1 ] ) ? -1.0 : 1.0
@@ -696,6 +725,457 @@
 					out.x = (1-s)*( (1-t)*z[k00] + t*(z[k01]+wrap) ) + s*( (1-t)*z[k10] + t*(z[k11]+wrap) )
 					out.y = ysign*( (1-s)*( (1-t)*z[k00+1] + t*z[k01+1] ) + s*( (1-t)*z[k10+1] + t*z[k11+1] ) )
 				}
+			}
+
+			// Cone metric (experiment). A conformal map scales the pattern by exp(phi), and
+			// phi cannot be constant on a curved pot: it obeys  laplacian(phi) = K, the
+			// Gaussian curvature. The way to keep the pattern one size nearly everywhere is
+			// to flatten onto a surface whose curvature all sits in a few cone points with
+			// angles the pattern lattice allows: multiples of q = 2 pi / order (order 4 =
+			// square lattice, where 3 or 5 squares meet at a cone instead of 4). Then
+			//     L phi = Ktarget - Korig
+			// with L the cotangent Laplacian, Korig the discrete curvature of the mesh
+			// (2 pi - angle sum; pi - angle sum on the foot and rim rings, i.e. how much the
+			// boundary turns) and Ktarget zero except at the cones and on the boundary.
+			//
+			// Cone placement uses the fact that the curvature of a pot is organised by height:
+			// walk up the rings accumulating Korig, round the running total to a multiple of
+			// q, and put a cone on the ring wherever the rounded total steps. The foot and
+			// rim get the rounded boundary turning, spread along their length, so the pattern
+			// also closes up around the pot after a whole number of lattice rotations.
+			// Around the ring, successive cones are spaced by the golden angle.
+			//
+			// This computes only the scale factor and the cones; coneLayout() makes the uv map.
+			// Returns { phi: function(u,v), cones: [ { p: Vector3, sign: +1 or -1, i, j } ], ... }.
+			// phi has zero area-weighted mean. Pattern size on the pot goes as exp(-phi).
+			function coneMetric( fn, nu, nv, order ) {
+
+				const n = (nu+1)*nv
+				const fold = j => ( 2*j < nv ) ? 2*j : 2*(nv-1-j) + 1
+				const vid = (i,j) => i*nv + fold(j)
+				const bw = nv+2
+				const w = bw+1
+				const q = 2.0*Math.PI/order
+
+				const P = []
+				for (let i = 0; i <= nu; i++) {
+					for (let j = 0; j < nv; j++) {
+						const p = new THREE.Vector3()
+						fn( i/nu, j/nv, p )
+						P.push( p )
+					}
+				}
+
+				// triangles as corner triples, both as solver index (vid) and grid id
+				const tv = [], tg = []
+				for (let i = 0; i < nu; i++) {
+					for (let j = 0; j < nv; j++) {
+						for (const c of [ [[i,j],[i+1,j],[i+1,j+1]], [[i,j],[i+1,j+1],[i,j+1]] ]) {
+							for (const [ci,cj] of c) { tv.push( vid(ci,cj%nv) ) ; tg.push( ci*nv + cj%nv ) }
+						}
+					}
+				}
+				const nT = tv.length/3
+				const len0 = new Float64Array( 3*nT )   // len0[3T+k] is the edge opposite corner k
+				for (let T = 0; T < nT; T++) {
+					for (let k = 0; k < 3; k++) { len0[3*T+k] = P[tg[3*T+(k+1)%3]].distanceTo( P[tg[3*T+(k+2)%3]] ) }
+				}
+				const full = new Float64Array( n )
+				for (let i = 0; i <= nu; i++) {
+					for (let j = 0; j < nv; j++) { full[vid(i,j)] = ( i == 0 || i == nu ) ? Math.PI : 2.0*Math.PI }
+				}
+
+				// Curvature and cotangent Laplacian of the mesh with edges rescaled by phi:
+				// l' = l exp( (phi_a + phi_b)/2 ).
+				const area = new Float64Array( n )
+				function assemble( phi, wantArea ) {
+					const L = new Float64Array( n*w )
+					const K = new Float64Array( full )
+					const len = [0,0,0]
+					for (let T = 0; T < nT; T++) {
+						const v = [ tv[3*T], tv[3*T+1], tv[3*T+2] ]
+						for (let k = 0; k < 3; k++) { len[k] = len0[3*T+k]*Math.exp( 0.5*( phi[v[(k+1)%3]] + phi[v[(k+2)%3]] ) ) }
+						const sp = 0.5*( len[0]+len[1]+len[2] )
+						const a = Math.sqrt( Math.max( 0.0, sp*(sp-len[0])*(sp-len[1])*(sp-len[2]) ) )
+						if (!(a > 1e-12*sp*sp)) {
+							// collapsed, or the rescaled lengths no longer make a triangle: the corner
+							// opposite the over-long edge takes the whole angle pi
+							for (let k = 0; k < 3; k++) { if (len[k] >= sp && sp > 0.0) { K[v[k]] -= Math.PI } }
+							continue
+						}
+						for (let k = 0; k < 3; k++) {
+							const l1 = len[(k+1)%3], l2 = len[(k+2)%3]
+							const cosk = Math.min( 1.0, Math.max( -1.0, (l1*l1 + l2*l2 - len[k]*len[k])/(2.0*l1*l2) ) )
+							K[v[k]] -= Math.acos( cosk )
+							if (wantArea) { area[v[k]] += a/3.0 }
+							// cotangent weight on the opposite edge. It can be negative (obtuse corner), but
+							// each triangle's block is still positive semidefinite, so L is too, and
+							// using it unclamped is what makes this the exact Hessian for Newton.
+							const wt = 0.5*cosk/Math.sqrt( Math.max( 1e-12, 1.0-cosk*cosk ) )
+							const va = v[(k+1)%3], vb = v[(k+2)%3]
+							const hi = Math.max(va,vb), lo = Math.min(va,vb)
+							L[ va*w + bw ] += wt
+							L[ vb*w + bw ] += wt
+							L[ hi*w + (lo-hi+bw) ] -= wt
+						}
+					}
+					return { L: L, K: K }
+				}
+
+				let phi = new Float64Array( n )
+				let cur = assemble( phi, true )
+				const Korig = cur.K
+				const ringK = new Float64Array( nu+1 )
+				for (let i = 0; i <= nu; i++) {
+					for (let j = 0; j < nv; j++) {
+						const v = vid(i,j)
+						if (!(area[v] > 0.0)) { Korig[v] = 0.0 }   // vertex with no real triangles
+						ringK[i] += Korig[v]
+					}
+				}
+
+				// quantize the running total of curvature, ring by ring
+				const Ktarget = new Float64Array( n )
+				const cones = []
+				const golden = 0.6180339887498949
+				let S = 0.0, Qlast = 0.0, ncone = 0
+				for (let i = 0; i <= nu; i++) {
+					S += ringK[i]
+					// the last ring takes whatever is left, so that Ktarget and Korig have the same total
+					const Q = (i == nu) ? S : q*Math.round( S/q )
+					const t = Q - Qlast
+					Qlast = Q
+					if (i == 0 || i == nu) {
+						// boundary turning, spread in proportion to length along the ring
+						const len = []
+						let total = 0.0
+						for (let j = 0; j < nv; j++) {
+							const l = P[i*nv+j].distanceTo( P[i*nv+(j+1)%nv] ) + P[i*nv+j].distanceTo( P[i*nv+(j+nv-1)%nv] )
+							len.push( l )
+							total += l
+						}
+						for (let j = 0; j < nv; j++) {
+							Ktarget[ vid(i,j) ] += (total > 0.0) ? t*len[j]/total : t/nv
+						}
+					} else {
+						const count = Math.round( Math.abs(t)/q )
+						const sign = (t > 0.0) ? 1.0 : -1.0
+						for (let c = 0; c < count; c++) {
+							ncone += 1
+							let j = Math.floor( ( (ncone*golden) % 1.0 )*nv ) % nv
+							while (Ktarget[ vid(i,j) ] != 0.0) { j = (j+1) % nv }
+							Ktarget[ vid(i,j) ] = sign*q
+							cones.push( { p: P[i*nv+j].clone(), sign: sign, i: i, j: j } )
+						}
+					}
+				}
+
+				// Newton's method on the (convex) discrete conformal energy: each step solves
+				// L delta = Ktarget - K(phi) with the Laplacian of the current rescaled mesh.
+				// L is singular (constants); the right hand side sums to zero, so pinning one
+				// value costs nothing. The first step alone is the linear estimate; the later
+				// ones make the rescaled mesh flat (to 1e-4 radians), which is what lets
+				// coneLayout() unfold it consistently.
+				const resid = function( K ) {
+					let m = 0.0
+					for (let v = 0; v < n; v++) { if (area[v] > 0.0) { m = Math.max( m, Math.abs( Ktarget[v]-K[v] ) ) } }
+					return m
+				}
+				let err = resid( cur.K )
+				for (let it = 0; it < 8 && err > 1e-4; it++) {   // converges quadratically; usually 3 steps
+					const rhs = new Float64Array( n )
+					for (let v = 0; v < n; v++) { rhs[v] = (area[v] > 0.0) ? Ktarget[v] - cur.K[v] : 0.0 }
+					cur.L[ 0*w + bw ] += 1.0
+					const delta = bandedSolve( cur.L, rhs, n, bw )
+					// back off if a full step makes things worse
+					let step = 1.0
+					for (;;) {
+						const trial = new Float64Array( n )
+						for (let v = 0; v < n; v++) { trial[v] = phi[v] + step*delta[v] }
+						const next = assemble( trial, false )
+						const e = resid( next.K )
+						if (e < err || step < 0.1) { phi = trial ; cur = next ; err = e ; break }
+						step *= 0.5
+					}
+				}
+				let asum = 0.0, psum = 0.0
+				for (let v = 0; v < n; v++) { asum += area[v] ; psum += area[v]*phi[v] }
+				for (let v = 0; v < n; v++) { phi[v] -= psum/asum }
+
+				// the grid itself, for coneLayout(): values by grid id i*nv + j
+				const phig = new Float64Array( n )
+				for (let i = 0; i <= nu; i++) {
+					for (let j = 0; j < nv; j++) { phig[i*nv+j] = phi[vid(i,j)] }
+				}
+
+				return {
+					cones: cones,
+					nu: nu, nv: nv, P: P, phig: phig,
+					residual: err,   // largest remaining curvature error, radians
+					phi: function( u, v ) {
+						const fi = Math.min( Math.max(u,0.0), 1.0 ) * nu
+						const i = Math.min( Math.floor(fi), nu-1 )
+						const fj = Math.min( Math.max(v,0.0), 1.0 ) * nv
+						const j = Math.min( Math.floor(fj), nv-1 )
+						const s = fi-i
+						const t = fj-j
+						const j1 = (j+1)%nv
+						return (1-s)*( (1-t)*phi[vid(i,j)] + t*phi[vid(i,j1)] ) + s*( (1-t)*phi[vid(i+1,j)] + t*phi[vid(i+1,j1)] )
+					}
+				}
+			}
+
+			// Lay the cone metric out flat (experiment, first stage: seams are not yet matched up).
+			//
+			//  1. Rescale every edge: l' = l * exp( (phi_a + phi_b)/2 ). The rescaled mesh is
+			//     flat except at the cones.
+			//  2. Cut it open into a disk: one seam up column 0, plus a slit along its ring
+			//     from the seam to each cone. Vertices on a cut are duplicated; how many copies
+			//     each needs falls out of a union-find over triangle corners joined across
+			//     uncut edges.
+			//  3. Unfold: walk from triangle to triangle across uncut edges, carrying the
+			//     rotation theta that places each triangle's own flat drawing in the plane.
+			//  4. Solve for the uv of the cut vertices in the least squares sense,
+			//         sum over triangle edges  w | uv_b - uv_a - R(theta) e' |^2 ,
+			//     with cotangent weights w. This is a Poisson problem with the same matrix
+			//     for x and y, so it is factored once. It spreads out the small inconsistency
+			//     left by step 1 being a linearization.
+			//
+			// uv is divided by the mean circumference so that, as with the other maps, one
+			// unit is roughly one turn. Returns { geometry, param_uv }: the cut mesh as an
+			// indexed BufferGeometry, and the surface parameters (u,v) of each of its vertices.
+			function coneLayout( cm ) {
+
+				const nu = cm.nu, nv = cm.nv, P = cm.P, phig = cm.phig
+				const ng = (nu+1)*nv
+				const gid = (i,j) => i*nv + (j%nv)
+
+				// triangles, wound so that in the plane v runs along +x and u along +y
+				const tri = []
+				for (let i = 0; i < nu; i++) {
+					for (let j = 0; j < nv; j++) {
+						const a = gid(i,j), b = gid(i,j+1), c = gid(i+1,j), d = gid(i+1,j+1)
+						tri.push( a,b,d, a,d,c )
+					}
+				}
+				const nT = tri.length/3
+
+				const ekey = (a,b) => (a < b) ? a*ng+b : b*ng+a
+				const cut = new Set()
+				for (let i = 0; i < nu; i++) { cut.add( ekey( gid(i,0), gid(i+1,0) ) ) }
+				for (const c of cm.cones) {
+					// the shorter way round the ring to the seam
+					const j0 = (2*c.j <= nv) ? 0 : c.j
+					const j1 = (2*c.j <= nv) ? c.j : nv
+					for (let j = j0; j < j1; j++) { cut.add( ekey( gid(c.i,j), gid(c.i,j+1) ) ) }
+				}
+
+				// adjacency across uncut edges; edge k of a triangle runs from corner k to corner k+1
+				const adj = new Int32Array( 3*nT ).fill( -1 )
+				const parent = new Int32Array( 3*nT )
+				for (let c = 0; c < 3*nT; c++) { parent[c] = c }
+				function find(c) {
+					while (parent[c] != c) { parent[c] = parent[parent[c]] ; c = parent[c] }
+					return c
+				}
+				const seen = new Map()
+				for (let T = 0; T < nT; T++) {
+					for (let k = 0; k < 3; k++) {
+						const key = ekey( tri[3*T+k], tri[3*T+(k+1)%3] )
+						if (cut.has(key)) { continue }
+						if (!seen.has(key)) { seen.set( key, 3*T+k ) ; continue }
+						const other = seen.get(key)
+						const T2 = Math.floor(other/3), k2 = other%3
+						adj[3*T+k] = other
+						adj[other] = 3*T+k
+						// the shared edge runs opposite ways in the two triangles
+						parent[ find(3*T+k) ] = find( 3*T2+(k2+1)%3 )
+						parent[ find(3*T+(k+1)%3) ] = find( 3*T2+k2 )
+					}
+				}
+
+				// each triangle drawn flat in its own frame, from the rescaled edge lengths:
+				// corner 0 at the origin, corner 1 on the +x axis
+				const q = new Float64Array( 6*nT )
+				for (let T = 0; T < nT; T++) {
+					const g = [ tri[3*T], tri[3*T+1], tri[3*T+2] ]
+					let l01 = P[g[0]].distanceTo(P[g[1]]), l12 = P[g[1]].distanceTo(P[g[2]]), l20 = P[g[2]].distanceTo(P[g[0]])
+					const s01 = Math.exp( 0.5*(phig[g[0]]+phig[g[1]]) ), s12 = Math.exp( 0.5*(phig[g[1]]+phig[g[2]]) ), s20 = Math.exp( 0.5*(phig[g[2]]+phig[g[0]]) )
+					if ( l01*s01 < l12*s12 + l20*s20 && l12*s12 < l20*s20 + l01*s01 && l20*s20 < l01*s01 + l12*s12 ) {
+						l01 *= s01 ; l12 *= s12 ; l20 *= s20
+					} else {
+						// right at a cone the rescaled lengths can fail to make a triangle; keep the shape, scale it
+						const sm = Math.exp( (phig[g[0]]+phig[g[1]]+phig[g[2]])/3.0 )
+						l01 *= sm ; l12 *= sm ; l20 *= sm
+					}
+					const x = (l01 > 0.0) ? (l01*l01 + l20*l20 - l12*l12)/(2.0*l01) : 0.0
+					q[6*T+2] = l01
+					q[6*T+4] = x
+					q[6*T+5] = Math.sqrt( Math.max( 0.0, l20*l20 - x*x ) )
+				}
+
+				// unfold: breadth first from triangle 0, whose frame already has v along +x
+				const theta = new Float64Array( nT )
+				const visited = new Uint8Array( nT )
+				const queue = [0]
+				visited[0] = 1
+				for (let h = 0; h < queue.length; h++) {
+					const T = queue[h]
+					for (let k = 0; k < 3; k++) {
+						if (adj[3*T+k] < 0) { continue }
+						const T2 = Math.floor(adj[3*T+k]/3), k2 = adj[3*T+k]%3
+						if (visited[T2]) { continue }
+						const k1 = (k+1)%3, k3 = (k2+1)%3
+						const alpha = theta[T] + Math.atan2( q[6*T+2*k1+1]-q[6*T+2*k+1], q[6*T+2*k1]-q[6*T+2*k] )
+						const beta = Math.atan2( q[6*T2+2*k3+1]-q[6*T2+2*k2+1], q[6*T2+2*k3]-q[6*T2+2*k2] )
+						theta[T2] = alpha - beta - Math.PI
+						visited[T2] = 1
+						queue.push( T2 )
+					}
+				}
+
+				// number the cut vertices ring by ring, folded, as in lscmMap(), so the matrix is banded
+				const fold = j => ( 2*j < nv ) ? 2*j : 2*(nv-1-j) + 1
+				const roots = []
+				for (let c = 0; c < 3*nT; c++) { if (find(c) == c) { roots.push(c) } }
+				const rank = c => Math.floor(tri[c]/nv)*nv + fold( tri[c]%nv )
+				roots.sort( (a,b) => rank(a)-rank(b) )
+				const cvOfRoot = new Map()
+				roots.forEach( (c,idx) => cvOfRoot.set(c,idx) )
+				const n = roots.length
+				const cv = new Int32Array( 3*nT )
+				let bw = 1
+				for (let c = 0; c < 3*nT; c++) { cv[c] = cvOfRoot.get( find(c) ) }
+				for (let T = 0; T < nT; T++) {
+					for (let k = 0; k < 3; k++) { bw = Math.max( bw, Math.abs( cv[3*T+k] - cv[3*T+(k+1)%3] ) ) }
+				}
+				const w = bw+1
+
+				const N = new Float64Array( n*w )
+				const X = new Float64Array( n )
+				const Y = new Float64Array( n )
+				for (let T = 0; T < nT; T++) {
+					const ct = Math.cos(theta[T]), st = Math.sin(theta[T])
+					for (let k = 0; k < 3; k++) {
+						const k1 = (k+1)%3, k2 = (k+2)%3
+						// cotangent at the corner opposite this edge
+						const ax = q[6*T+2*k]-q[6*T+2*k2], ay = q[6*T+2*k+1]-q[6*T+2*k2+1]
+						const bx = q[6*T+2*k1]-q[6*T+2*k2], by = q[6*T+2*k1+1]-q[6*T+2*k2+1]
+						const crs = Math.abs( ax*by - ay*bx )
+						const wt = (crs > 0.0) ? 0.5*(ax*bx + ay*by)/crs : 0.0
+						const ex = q[6*T+2*k1]-q[6*T+2*k], ey = q[6*T+2*k1+1]-q[6*T+2*k+1]
+						const dx = ct*ex - st*ey, dy = st*ex + ct*ey
+						const va = cv[3*T+k], vb = cv[3*T+k1]
+						const hi = Math.max(va,vb), lo = Math.min(va,vb)
+						N[ va*w + bw ] += wt
+						N[ vb*w + bw ] += wt
+						N[ hi*w + (lo-hi+bw) ] -= wt
+						X[va] -= wt*dx ; X[vb] += wt*dx
+						Y[va] -= wt*dy ; Y[vb] += wt*dy
+					}
+				}
+				N[ 0*w + bw ] += 1.0   // pin one vertex; the right hand sides sum to zero
+				bandedFactor( N, n, bw )
+				bandedSubstitute( N, X, n, bw )
+				bandedSubstitute( N, Y, n, bw )
+
+				let cref = 0.0
+				for (let i = 0; i <= nu; i++) {
+					for (let j = 0; j < nv; j++) { cref += P[gid(i,j)].distanceTo( P[gid(i,j+1)] ) }
+				}
+				cref /= (nu+1)
+
+				// smooth normals from the uncut grid, so the cuts do not show in the shading
+				const normal = []
+				for (let g = 0; g < ng; g++) { normal.push( new THREE.Vector3() ) }
+				const e1 = new THREE.Vector3(), e2 = new THREE.Vector3()
+				for (let T = 0; T < nT; T++) {
+					e1.subVectors( P[tri[3*T+1]], P[tri[3*T]] )
+					e2.subVectors( P[tri[3*T+2]], P[tri[3*T]] )
+					e1.cross( e2 )
+					for (let k = 0; k < 3; k++) { normal[tri[3*T+k]].add( e1 ) }
+				}
+
+				const positions = new Float32Array( 3*n )
+				const normals = new Float32Array( 3*n )
+				const uvs = new Float32Array( 2*n )
+				const param_uv = new Float32Array( 2*n )
+				roots.forEach( function(c,idx) {
+					const g = tri[c]
+					normal[g].normalize()
+					positions.set( [ P[g].x, P[g].y, P[g].z ], 3*idx )
+					normals.set( [ normal[g].x, normal[g].y, normal[g].z ], 3*idx )
+					uvs.set( [ X[idx]/cref, Y[idx]/cref ], 2*idx )
+					param_uv.set( [ Math.floor(g/nv)/nu, (g%nv)/nv ], 2*idx )
+				} )
+				const geometry = new THREE.BufferGeometry()
+				geometry.setAttribute( 'position', new THREE.BufferAttribute( positions, 3 ) )
+				geometry.setAttribute( 'normal', new THREE.BufferAttribute( normals, 3 ) )
+				geometry.setAttribute( 'uv', new THREE.BufferAttribute( uvs, 2 ) )
+				geometry.setIndex( Array.from( cv ) )
+				return { geometry: geometry, param_uv: param_uv }
+			}
+
+			const CONE_U = 40
+			const CONE_V = 90
+
+			// log scale factor of the uv map currently on a geometry, per vertex: half the log
+			// of (uv area / surface area) of the surrounding triangles, mean removed.
+			function uvLogScale( geometry ) {
+				const pos = geometry.attributes.position
+				const uv = geometry.attributes.uv
+				const index = geometry.index
+				const sum = new Float64Array( pos.count )
+				const wsum = new Float64Array( pos.count )
+				const p = [ new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3() ]
+				const e1 = new THREE.Vector3()
+				const e2 = new THREE.Vector3()
+				for (let t = 0; t < index.count; t += 3) {
+					const id = [ index.getX(t), index.getX(t+1), index.getX(t+2) ]
+					for (let k = 0; k < 3; k++) { p[k].fromBufferAttribute( pos, id[k] ) }
+					e1.subVectors( p[1], p[0] )
+					e2.subVectors( p[2], p[0] )
+					const a3 = 0.5*e1.cross(e2).length()
+					const ux = uv.getX(id[1]) - uv.getX(id[0]), uy = uv.getY(id[1]) - uv.getY(id[0])
+					const vx = uv.getX(id[2]) - uv.getX(id[0]), vy = uv.getY(id[2]) - uv.getY(id[0])
+					const a2 = 0.5*Math.abs( ux*vy - uy*vx )
+					if (!(a3 > 0.0 && a2 > 0.0)) { continue }
+					const f = 0.5*Math.log( a2/a3 )
+					for (let k = 0; k < 3; k++) { sum[id[k]] += a3*f ; wsum[id[k]] += a3 }
+				}
+				let asum = 0.0, psum = 0.0
+				for (let i = 0; i < pos.count; i++) {
+					if (wsum[i] > 0.0) { sum[i] /= wsum[i] }
+					asum += wsum[i] ; psum += wsum[i]*sum[i]
+				}
+				for (let i = 0; i < pos.count; i++) { sum[i] -= psum/asum }
+				return { phi: sum, weight: wsum }
+			}
+
+			// Colour the mesh by pattern size exp(-phi) relative to the average: white is
+			// average, red is larger, blue is smaller, saturating at double and half.
+			// Returns a short summary for the GUI.
+			function paintLogScale( geometry, phi, weight ) {
+				const colors = new Float32Array( 3*phi.length )
+				for (let i = 0; i < phi.length; i++) {
+					const t = Math.min( 1.0, Math.max( -1.0, -phi[i]/Math.LN2 ) )
+					const a = Math.abs(t)
+					const c = (t > 0.0) ? [0.75,0.05,0.10] : [0.10,0.25,0.75]
+					for (let k = 0; k < 3; k++) { colors[3*i+k] = (1-a)*0.95 + a*c[k] }
+				}
+				geometry.setAttribute( 'color', new THREE.BufferAttribute( colors, 3 ) )
+
+				// 5th to 95th percentile of size by area, which ignores the spike right at each cone
+				const order = [...phi.keys()].sort( (a,b) => phi[b]-phi[a] )
+				let total = 0.0
+				for (let i = 0; i < phi.length; i++) { total += weight[i] }
+				let acc = 0.0, lo = null, hi = null
+				for (const i of order) {
+					acc += weight[i]
+					if (lo === null && acc >= 0.05*total) { lo = Math.exp(-phi[i]) }
+					if (hi === null && acc >= 0.95*total) { hi = Math.exp(-phi[i]) }
+				}
+				return lo.toFixed(2) + 'x to ' + hi.toFixed(2) + 'x'
 			}
 
 			const LSCM_U = 30
@@ -1152,6 +1632,18 @@ G1 F3360
 				tex.add( params, 'loadImage' ).name( 'Load image...' );
 				tex.close();
 
+				let sc = gui.addFolder( 'Pattern scale (experiment)' );
+				function scaleViewChanged() {
+					updateSurfaceImage();
+					updateSplineOutline();
+					render();
+				}
+				sc.add( params, 'scale_view', [ 'off', 'uv map', 'cone metric' ] ).name( 'Show pattern size' ).onChange( scaleViewChanged );
+				sc.add( params, 'cone_order', { 'p2 (180 deg)': 2, 'p3 (120 deg)': 3, 'p4 (90 deg)': 4, 'p6 (60 deg)': 6 } ).name( 'Lattice symmetry' ).onChange( scaleViewChanged );
+				sc.add( params, 'uv_cones' ).name( 'Cone uv layout (seams show)' ).onChange( scaleViewChanged );
+				scale_stats_controller = sc.add( params, 'scale_stats' ).name( 'Size range' ).disable();
+				sc.close();
+
 				let h = gui.addFolder( 'Export' );
 				h.add(params, 'user').name("Name (for labeling files):")
 				h.add( params, 'exportToObj' ).name( 'Export OBJ' );
@@ -1426,19 +1918,57 @@ G1 F3360
 				// x = angle around the pot in turns, y = conformal height U in the same units,
 				// so the map keeps its true aspect ratio (y is not normalized to 0..1).
 				// These go out in the OBJ export as vt lines.
-				const uvmap = surfaceUV()
-				const uvpt = new THREE.Vector2()
-				const uv = surface.geometry.attributes.uv
-				for ( let i = 0; i < uv.count; i ++ ) {
-					uvmap( uv.getX(i), uv.getY(i), uvpt )
-					uv.setXY( i, uvpt.x, uvpt.y )
+				let cm = null
+				if (params.uv_cones || params.scale_view == 'cone metric') {
+					let nv = CONE_V
+					if (params.facet == true) { nv = params.n_facets * Math.ceil( CONE_V/params.n_facets ) }
+					cm = coneMetric( fn, CONE_U, nv, params.cone_order )
 				}
-				uv.needsUpdate = true
+				let param_uv = null   // the surface parameters (u,v) of each vertex
+				if (params.uv_cones) {
+					// cone layout (experiment): the mesh is replaced by one cut open along the seams
+					const lay = coneLayout( cm )
+					surface.geometry = lay.geometry
+					param_uv = lay.param_uv
+				} else {
+					const uvmap = surfaceUV()
+					const uvpt = new THREE.Vector2()
+					const puv = surface.geometry.attributes.uv
+					param_uv = new Float32Array( puv.array )
+					for ( let i = 0; i < puv.count; i ++ ) {
+						uvmap( puv.getX(i), puv.getY(i), uvpt )
+						puv.setXY( i, uvpt.x, uvpt.y )
+					}
+					puv.needsUpdate = true
+				}
+				const uv = surface.geometry.attributes.uv
+
+				// pattern size heat map (experiment): of the uv map on the mesh, or of the cone metric
+				let cone_markers = (cm !== null) ? cm.cones : []
+				if (params.scale_view == 'uv map') {
+					const ls = uvLogScale( surface.geometry )
+					params.scale_stats = paintLogScale( surface.geometry, ls.phi, ls.weight )
+				} else if (params.scale_view == 'cone metric') {
+					const phi = new Float64Array( uv.count )
+					for ( let i = 0; i < uv.count; i ++ ) {
+						phi[i] = cm.phi( param_uv[2*i], param_uv[2*i+1] )
+					}
+					const ls = uvLogScale( surface.geometry )
+					const npos = cm.cones.filter( c => c.sign > 0 ).length
+					params.scale_stats = paintLogScale( surface.geometry, phi, ls.weight ) + ', cones +' + npos + ' -' + (cm.cones.length-npos)
+				}
+				if (scale_stats_controller !== null) { scale_stats_controller.updateDisplay() }
 
 				surface.mesh = new THREE.Mesh( surface.geometry, surface_material );
 
 				surface.mesh.receiveShadow = true;
 
+				// cones: black where the pattern loses a sector (positive curvature), green where it gains one
+				for (const c of cone_markers) {
+					const marker = new THREE.Mesh( new THREE.SphereGeometry( 9, 12, 8 ), new THREE.MeshBasicMaterial( { color: (c.sign > 0) ? 0x000000 : 0x00dd44 } ) )
+					marker.position.copy( c.p )
+					surface.mesh.add( marker )
+				}
 
 
 				if (params.bottom == true) {
@@ -1521,6 +2051,9 @@ G1 F3360
 				ppp.uv_lscm = params.uv_lscm;
 				ppp.surface_image = params.surface_image;
 				ppp.image_repeat = params.image_repeat;
+				ppp.scale_view = params.scale_view;
+				ppp.cone_order = params.cone_order;
+				ppp.uv_cones = params.uv_cones;
 				ppp.set_height = params.set_height;
 				ppp.target_height = params.target_height;
 				ppp.npoints = ppp.points.length;
