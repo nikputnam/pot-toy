@@ -130,6 +130,8 @@
 				scale_view: 'off',
 				cone_order: 4,
 				uv_cones: false,
+				flat_view: false,
+				match_seams: false,
 				scale_stats: '',
 				loadImage: loadImage
 
@@ -154,8 +156,11 @@
 			// repeating the image the same number of times in both keeps it undistorted.
 			// Until the user loads an image, a generated checkerboard is used.
 			let surface_image = null
+			let surface_image_loaded = false
+			let generated_kind = ''
 			let surface_image_controller = null
 			let scale_stats_controller = null
+			let dragging = false
 
 			function checkerTexture() {
 				const c = document.createElement( 'canvas' )
@@ -170,6 +175,52 @@
 				return new THREE.CanvasTexture( c )
 			}
 
+			// A test pattern with n-fold rotation centres on the lattice points: a comma
+			// shape repeated n times around each point (so its handedness shows, and a wrong
+			// rotation or a shifted seam is obvious). Square lattice for orders 2 and 4, one
+			// cell per tile; hexagonal for 3 and 6, where the tile is the 1 x sqrt(3)
+			// rectangle that holds two lattice points. This is the symmetry the matched cone
+			// layout needs of any image put on it.
+			function latticeTexture( order ) {
+				const hex = (order == 3 || order == 6)
+				const W = 256
+				const Ht = hex ? Math.round( W*Math.sqrt(3.0) ) : W
+				const c = document.createElement( 'canvas' )
+				c.width = W
+				c.height = Ht
+				const ctx = c.getContext( '2d' )
+				ctx.fillStyle = '#eeeeee'
+				ctx.fillRect( 0, 0, W, Ht )
+				ctx.lineCap = 'round'
+				for (let a = -2; a <= 3; a++) {
+					for (let b = -2; b <= 4; b++) {
+						const x = hex ? a + 0.5*b : a
+						const y = hex ? b*Math.sqrt(3.0)/2.0 : b
+						for (let m = 0; m < order; m++) {
+							ctx.save()
+							ctx.translate( x*W, y*W )
+							ctx.rotate( 2.0*Math.PI*m/order )
+							ctx.strokeStyle = '#333333'
+							ctx.lineWidth = 0.05*W
+							ctx.beginPath()
+							ctx.moveTo( 0.10*W, 0.0 )
+							ctx.quadraticCurveTo( 0.30*W, 0.02*W, 0.33*W, 0.17*W )
+							ctx.stroke()
+							ctx.fillStyle = '#bb3311'
+							ctx.beginPath()
+							ctx.arc( 0.33*W, 0.17*W, 0.045*W, 0.0, 2.0*Math.PI )
+							ctx.fill()
+							ctx.restore()
+						}
+						ctx.fillStyle = '#333333'
+						ctx.beginPath()
+						ctx.arc( x*W, y*W, 0.04*W, 0.0, 2.0*Math.PI )
+						ctx.fill()
+					}
+				}
+				return new THREE.CanvasTexture( c )
+			}
+
 			function updateSurfaceImage() {
 				surface_material.vertexColors = (params.scale_view != 'off')
 				surface_material.toneMapped = (params.scale_view == 'off')   // keep the heat map colours true
@@ -178,7 +229,13 @@
 					surface_material.map = null
 					surface_material.color.setHex( 0xffffff )
 				} else if (params.surface_image) {
-					if (surface_image === null) { surface_image = checkerTexture() }
+					// a loaded image wins; otherwise a generated one, remade when the kind needed changes
+					const kind = (params.uv_cones && params.match_seams) ? 'p' + params.cone_order : 'checker'
+					if (!surface_image_loaded && generated_kind != kind) {
+						if (surface_image !== null) { surface_image.dispose() }
+						surface_image = (kind == 'checker') ? checkerTexture() : latticeTexture( params.cone_order )
+						generated_kind = kind
+					}
 					surface_image.wrapS = THREE.RepeatWrapping
 					surface_image.wrapT = THREE.RepeatWrapping
 					// keep the image's aspect ratio: a wide image covers fewer turns vertically
@@ -205,6 +262,7 @@
 						URL.revokeObjectURL( url )
 						if (surface_image !== null) { surface_image.dispose() }
 						surface_image = texture
+						surface_image_loaded = true
 						// loading an image turns the display on
 						params.surface_image = true
 						if (surface_image_controller !== null) { surface_image_controller.updateDisplay() }
@@ -823,7 +881,7 @@
 				}
 
 				let phi = new Float64Array( n )
-				let cur = assemble( phi, true )
+				let cur = assemble( phi, true )   // at phi = 0: the curvature of the pot itself
 				const Korig = cur.K
 				const ringK = new Float64Array( nu+1 )
 				for (let i = 0; i <= nu; i++) {
@@ -838,6 +896,7 @@
 				const Ktarget = new Float64Array( n )
 				const cones = []
 				const golden = 0.6180339887498949
+				const usedcols = new Set()
 				let S = 0.0, Qlast = 0.0, ncone = 0
 				for (let i = 0; i <= nu; i++) {
 					S += ringK[i]
@@ -862,8 +921,11 @@
 						const sign = (t > 0.0) ? 1.0 : -1.0
 						for (let c = 0; c < count; c++) {
 							ncone += 1
+							// one cone per column and none on column 0, so that the cuts coneLayout()
+							// makes (straight up or down a column) never run through another cone or the seam
 							let j = Math.floor( ( (ncone*golden) % 1.0 )*nv ) % nv
-							while (Ktarget[ vid(i,j) ] != 0.0) { j = (j+1) % nv }
+							while (j == 0 || usedcols.has(j)) { j = (j+1) % nv }
+							usedcols.add( j )
 							Ktarget[ vid(i,j) ] = sign*q
 							cones.push( { p: P[i*nv+j].clone(), sign: sign, i: i, j: j } )
 						}
@@ -925,12 +987,12 @@
 				}
 			}
 
-			// Lay the cone metric out flat (experiment, first stage: seams are not yet matched up).
+			// Lay the cone metric out flat (experiment).
 			//
 			//  1. Rescale every edge: l' = l * exp( (phi_a + phi_b)/2 ). The rescaled mesh is
 			//     flat except at the cones.
-			//  2. Cut it open into a disk: one seam up column 0, plus a slit along its ring
-			//     from the seam to each cone. Vertices on a cut are duplicated; how many copies
+			//  2. Cut it open into a disk: one seam up column 0, plus a slit from each cone
+			//     along its column to the nearer of the foot and the rim. Vertices on a cut are duplicated; how many copies
 			//     each needs falls out of a union-find over triangle corners joined across
 			//     uncut edges.
 			//  3. Unfold: walk from triangle to triangle across uncut edges, carrying the
@@ -941,10 +1003,16 @@
 			//     for x and y, so it is factored once. It spreads out the small inconsistency
 			//     left by step 1 being a linearization.
 			//
+			//  5. Optionally (match = { order, repeat }) match the pattern up across the cuts;
+			//     see the comment at that step. It is slow, a second or so.
+			//
 			// uv is divided by the mean circumference so that, as with the other maps, one
-			// unit is roughly one turn. Returns { geometry, param_uv }: the cut mesh as an
-			// indexed BufferGeometry, and the surface parameters (u,v) of each of its vertices.
-			function coneLayout( cm ) {
+			// unit is roughly one turn (when matched: by the number of cells asked for per
+			// turn, so that the image repeat lines up with the lattice).
+			// Returns { geometry, param_uv, matched }: the cut mesh as an indexed
+			// BufferGeometry, the surface parameters (u,v) of each of its vertices, and
+			// seam matching statistics or null.
+			function coneLayout( cm, match ) {
 
 				const nu = cm.nu, nv = cm.nv, P = cm.P, phig = cm.phig
 				const ng = (nu+1)*nv
@@ -964,10 +1032,10 @@
 				const cut = new Set()
 				for (let i = 0; i < nu; i++) { cut.add( ekey( gid(i,0), gid(i+1,0) ) ) }
 				for (const c of cm.cones) {
-					// the shorter way round the ring to the seam
-					const j0 = (2*c.j <= nv) ? 0 : c.j
-					const j1 = (2*c.j <= nv) ? c.j : nv
-					for (let j = j0; j < j1; j++) { cut.add( ekey( gid(c.i,j), gid(c.i,j+1) ) ) }
+					// straight along its column to the nearer of the foot and the rim
+					const i0 = (2*c.i <= nu) ? 0 : c.i
+					const i1 = (2*c.i <= nu) ? c.i : nu
+					for (let i = i0; i < i1; i++) { cut.add( ekey( gid(i,c.j), gid(i+1,c.j) ) ) }
 				}
 
 				// adjacency across uncut edges; edge k of a triangle runs from corner k to corner k+1
@@ -979,10 +1047,16 @@
 					return c
 				}
 				const seen = new Map()
+				const cutseen = new Map()
+				const cutpairs = []
 				for (let T = 0; T < nT; T++) {
 					for (let k = 0; k < 3; k++) {
 						const key = ekey( tri[3*T+k], tri[3*T+(k+1)%3] )
-						if (cut.has(key)) { continue }
+						if (cut.has(key)) {
+							// remember the two sides of each cut edge, for seam matching
+							if (!cutseen.has(key)) { cutseen.set( key, 3*T+k ) } else { cutpairs.push( [ cutseen.get(key), 3*T+k ] ) }
+							continue
+						}
 						if (!seen.has(key)) { seen.set( key, 3*T+k ) ; continue }
 						const other = seen.get(key)
 						const T2 = Math.floor(other/3), k2 = other%3
@@ -1052,8 +1126,9 @@
 				const w = bw+1
 
 				const N = new Float64Array( n*w )
-				const X = new Float64Array( n )
-				const Y = new Float64Array( n )
+				let X = new Float64Array( n )
+				let Y = new Float64Array( n )
+				const edgeW = new Float64Array( 3*nT ), edgeDx = new Float64Array( 3*nT ), edgeDy = new Float64Array( 3*nT )
 				for (let T = 0; T < nT; T++) {
 					const ct = Math.cos(theta[T]), st = Math.sin(theta[T])
 					for (let k = 0; k < 3; k++) {
@@ -1067,6 +1142,7 @@
 						const dx = ct*ex - st*ey, dy = st*ex + ct*ey
 						const va = cv[3*T+k], vb = cv[3*T+k1]
 						const hi = Math.max(va,vb), lo = Math.min(va,vb)
+						edgeW[3*T+k] = wt ; edgeDx[3*T+k] = dx ; edgeDy[3*T+k] = dy
 						N[ va*w + bw ] += wt
 						N[ vb*w + bw ] += wt
 						N[ hi*w + (lo-hi+bw) ] -= wt
@@ -1084,6 +1160,221 @@
 					for (let j = 0; j < nv; j++) { cref += P[gid(i,j)].distanceTo( P[gid(i,j+1)] ) }
 				}
 				cref /= (nu+1)
+
+				// Seam matching. The layout above is an exact unfolding, so across every cut the
+				// two sides differ by a rigid motion  x -> R x + t  with R a whole number of
+				// lattice rotations. The pattern runs on unbroken exactly when every t is a
+				// lattice vector (then the motion is a symmetry of the pattern). That comes
+				// down to: each cone sits on a rotation centre of the pattern, of the right
+				// order, and the one translation across the main seam is a lattice vector.
+				//  1. Choose the free similarity (cell size within 7% of what was asked,
+				//     rotation, shift) that gets all of those as close to true as possible.
+				//  2. Round: move each cone's target to the nearest centre, and the seam
+				//     translation to the nearest lattice vector. (Nudging the cones themselves
+				//     onto vertices that already sit on centres, to avoid step 3's distortion,
+				//     was tried and does not settle: moving one cone re-cuts the sheet and
+				//     shifts all the others.)
+				//  3. Solve the layout again with those as stiff constraints, together with
+				//     "edges on the two sides of a cut stay rotated copies of each other".
+				//     R couples x and y, so this is one system twice the size. The rounding is
+				//     absorbed as a small smooth distortion.
+				// Works in lattice units: square lattice for orders 2 and 4, hexagonal for 3 and 6.
+				let unit = cref
+				let matched = null
+				if (match) {
+					const hex = (match.order == 3 || match.order == 6)
+					const q = 2.0*Math.PI/match.order
+					const H = Math.sqrt(3.0)/2.0
+					// nearest lattice point to (x,y)
+					const nearest = function( x, y ) {
+						if (!hex) { return [ Math.round(x), Math.round(y) ] }
+						const b0 = Math.round( y/H ), a0 = Math.round( x - 0.5*y/H )
+						let best = null, bd = Infinity
+						for (let a = a0-1; a <= a0+1; a++) {
+							for (let b = b0-1; b <= b0+1; b++) {
+								const lx = a + 0.5*b, ly = H*b
+								const d = (lx-x)*(lx-x) + (ly-y)*(ly-y)
+								if (d < bd) { bd = d ; best = [lx,ly] }
+							}
+						}
+						return best
+					}
+
+					// the two sides of every cut edge, and the rotation between them
+					const cuts = cutpairs.map( function( [cA,cB] ) {
+						const TA = Math.floor(cA/3), TB = Math.floor(cB/3)
+						const e = { Aa: cv[cA], Ab: cv[3*TA+(cA%3+1)%3], Bb: cv[cB], Ba: cv[3*TB+(cB%3+1)%3], ga: tri[cA], gb: tri[3*TA+(cA%3+1)%3] }
+						const ang = Math.atan2( Y[e.Bb]-Y[e.Ba], X[e.Bb]-X[e.Ba] ) - Math.atan2( Y[e.Ab]-Y[e.Aa], X[e.Ab]-X[e.Aa] )
+						e.theta = q*Math.round( ang/q )
+						return e
+					} )
+					// what has to land on the lattice: per cone (1 - R) x_cone, and for the seam x_B - R x_A
+					const gridToCv = new Map()
+					for (let c = 0; c < 3*nT; c++) { gridToCv.set( tri[c], cv[c] ) }
+					const items = []
+					for (const c of cm.cones) {
+						const g = gid(c.i,c.j)
+						const e = cuts.find( e => e.ga == g || e.gb == g )
+						items.push( { cone: gridToCv.get(g), theta: e.theta } )
+					}
+					const seam = cuts.filter( e => e.ga%nv == 0 && e.gb%nv == 0 ).sort( (a,b) => Math.min(a.ga,a.gb) - Math.min(b.ga,b.gb) )[0]
+					items.push( { seam: seam, theta: seam.theta } )
+
+					// lattice-unit position of a layout point under the similarity (sc, al, tx, ty)
+					const evalItem = function( it, sc, ca, sa, tx, ty ) {
+						const ct = Math.cos(it.theta), st = Math.sin(it.theta)
+						if (it.seam) {
+							const ax = sc*(ca*X[it.seam.Aa] - sa*Y[it.seam.Aa]) + tx, ay = sc*(sa*X[it.seam.Aa] + ca*Y[it.seam.Aa]) + ty
+							const bx = sc*(ca*X[it.seam.Ba] - sa*Y[it.seam.Ba]) + tx, by = sc*(sa*X[it.seam.Ba] + ca*Y[it.seam.Ba]) + ty
+							return [ bx - (ct*ax - st*ay), by - (st*ax + ct*ay) ]
+						}
+						const x = sc*(ca*X[it.cone] - sa*Y[it.cone]) + tx, y = sc*(sa*X[it.cone] + ca*Y[it.cone]) + ty
+						return [ x - (ct*x - st*y), y - (st*x + ct*y) ]
+					}
+					const cost = function( sc, al, tx, ty ) {
+						const ca = Math.cos(al), sa = Math.sin(al)
+						let sum = 0.0
+						for (const it of items) {
+							const t = evalItem( it, sc, ca, sa, tx, ty )
+							const l = nearest( t[0], t[1] )
+							sum += (t[0]-l[0])*(t[0]-l[0]) + (t[1]-l[1])*(t[1]-l[1])
+						}
+						return sum
+					}
+					// Search for the similarity that needs the least rounding (coarse grid, then
+					// shrinking steps), then round. labels: the centre each cone is to sit on, and
+					// the lattice vector for the seam.
+					const sc0 = match.repeat/cref
+					let best = [ sc0, 0.0, 0.0, 0.0 ]
+					let labels = null
+					{
+						let bestc = Infinity
+						const nal = Math.max( 24, Math.round( 360/match.order/1.5 ) )
+						for (let a = 0; a < 11; a++) {
+							for (let b = 0; b < nal; b++) {
+								for (let c = 0; c < 6; c++) {
+									for (let d = 0; d < 6; d++) {
+										const tr = [ sc0*(0.93 + 0.014*a), q*b/nal, c/6.0 + 0.5*(hex ? d/6.0 : 0.0), (hex ? H : 1.0)*d/6.0 ]
+										const cc = cost( tr[0], tr[1], tr[2], tr[3] )
+										if (cc < bestc) { bestc = cc ; best = tr }
+									}
+								}
+							}
+						}
+						let steps = [ 0.007*sc0, q/nal/2.0, 1.0/12.0, 1.0/12.0 ]
+						for (let round = 0; round < 8; round++) {
+							for (let k = 0; k < 4; k++) {
+								for (const dir of [-1.0,1.0]) {
+									const tr = best.slice()
+									tr[k] += dir*steps[k]
+									if (k == 0 && Math.abs( tr[0]/sc0 - 1.0 ) > 0.07) { continue }
+									const cc = cost( tr[0], tr[1], tr[2], tr[3] )
+									if (cc < bestc) { bestc = cc ; best = tr }
+								}
+							}
+							steps = steps.map( x => 0.5*x )
+						}
+						const ca0 = Math.cos(best[1]), sa0 = Math.sin(best[1])
+						labels = items.map( function( it ) {
+							const t = evalItem( it, best[0], ca0, sa0, best[2], best[3] )
+							const l = nearest( t[0], t[1] )
+							if (it.seam) { return l }
+							// the centre p with (1 - R) p = l
+							const ct = Math.cos(it.theta), st = Math.sin(it.theta)
+							const det = (1.0-ct)*(1.0-ct) + st*st
+							return [ ( (1.0-ct)*l[0] - st*l[1] )/det, ( st*l[0] + (1.0-ct)*l[1] )/det ]
+						} )
+					}
+					const sc = best[0], ca = Math.cos(best[1]), sa = Math.sin(best[1])
+					// each item's target t, from its label
+					const target = function( it, k ) {
+						if (it.seam) { return labels[k] }
+						const ct = Math.cos(it.theta), st = Math.sin(it.theta)
+						return [ (1.0-ct)*labels[k][0] + st*labels[k][1], -st*labels[k][0] + (1.0-ct)*labels[k][1] ]
+					}
+
+					// the constrained solve: unknowns (x,y) interleaved per cut vertex
+					let bwv = bw
+					for (const e of cuts) {
+						const v = [ e.Aa, e.Ab, e.Ba, e.Bb ]
+						bwv = Math.max( bwv, Math.max(...v) - Math.min(...v) )
+					}
+					const n2 = 2*n, bw2 = 2*bwv+1, w2 = bw2+1
+					const M = new Float64Array( n2*w2 )
+					const rhs = new Float64Array( n2 )
+					const addRow = function( idx, coef, r, wgt ) {
+						for (let a = 0; a < idx.length; a++) {
+							rhs[idx[a]] += wgt*coef[a]*r
+							for (let b = 0; b < idx.length; b++) {
+								if (idx[b] <= idx[a]) { M[ idx[a]*w2 + (idx[b]-idx[a]+bw2) ] += wgt*coef[a]*coef[b] }
+							}
+						}
+					}
+					for (let T = 0; T < nT; T++) {
+						for (let k = 0; k < 3; k++) {
+							const va = cv[3*T+k], vb = cv[3*T+(k+1)%3]
+							const dx = sc*(ca*edgeDx[3*T+k] - sa*edgeDy[3*T+k]), dy = sc*(sa*edgeDx[3*T+k] + ca*edgeDy[3*T+k])
+							addRow( [2*va,2*vb], [-1.0,1.0], dx, edgeW[3*T+k] )
+							addRow( [2*va+1,2*vb+1], [-1.0,1.0], dy, edgeW[3*T+k] )
+						}
+					}
+					const stiff = 1.0e4
+					for (const e of cuts) {
+						const ct = Math.cos(e.theta), st = Math.sin(e.theta)
+						// (x_Bb - x_Ba) - R (x_Ab - x_Aa) = 0
+						addRow( [2*e.Bb,2*e.Ba,2*e.Ab,2*e.Ab+1,2*e.Aa,2*e.Aa+1], [1.0,-1.0,-ct,st,ct,-st], 0.0, stiff )
+						addRow( [2*e.Bb+1,2*e.Ba+1,2*e.Ab,2*e.Ab+1,2*e.Aa,2*e.Aa+1], [1.0,-1.0,-st,-ct,st,ct], 0.0, stiff )
+					}
+					const PATCH = 2
+					const cvgrid = roots.map( c => tri[c] )
+					let moved = 0.0   // how far the constraints pull anything, in cells
+					items.forEach( function( it, k ) {
+						const t = evalItem( it, sc, ca, sa, best[2], best[3] )
+						const l = target( it, k )
+						const ct = Math.cos(it.theta), st = Math.sin(it.theta)
+						if (it.seam) {
+							const e = it.seam
+							moved = Math.max( moved, Math.hypot( t[0]-l[0], t[1]-l[1] ) )
+							addRow( [2*e.Ba,2*e.Aa,2*e.Aa+1], [1.0,-ct,st], l[0], stiff )
+							addRow( [2*e.Ba+1,2*e.Aa,2*e.Aa+1], [1.0,-st,-ct], l[1], stiff )
+						} else {
+							moved = Math.max( moved, Math.hypot( t[0]-l[0], t[1]-l[1] )/Math.hypot( 1.0-ct, st ) )
+							// Pulling on the cone vertex alone would leave a spike (a point load on a
+							// membrane). Move a small patch around it as one piece instead: every copy
+							// of every vertex within PATCH grid steps goes to its fitted place plus the
+							// cone's shift. Both sides of the slit shift alike, so they stay matched.
+							const x0 = sc*(ca*X[it.cone] - sa*Y[it.cone]) + best[2], y0 = sc*(sa*X[it.cone] + ca*Y[it.cone]) + best[3]
+							const sx = labels[k][0]-x0, sy = labels[k][1]-y0
+							const c = cm.cones[k]
+							for (let v = 0; v < n; v++) {
+								const i = Math.floor(cvgrid[v]/nv), j = cvgrid[v]%nv
+								const dj = Math.min( (j-c.j+nv)%nv, (c.j-j+nv)%nv )
+								if (Math.abs(i-c.i) > PATCH || dj > PATCH) { continue }
+								addRow( [2*v], [1.0], sc*(ca*X[v] - sa*Y[v]) + best[2] + sx, stiff )
+								addRow( [2*v+1], [1.0], sc*(sa*X[v] + ca*Y[v]) + best[3] + sy, stiff )
+							}
+						}
+					} )
+					// a feather-light anchor, for the case where nothing above fixes the position
+					addRow( [0], [1.0], sc*(ca*X[0] - sa*Y[0]) + best[2], 1.0e-6 )
+					addRow( [1], [1.0], sc*(sa*X[0] + ca*Y[0]) + best[3], 1.0e-6 )
+					const z = bandedSolve( M, rhs, n2, bw2 )
+					X = new Float64Array( n ) ; Y = new Float64Array( n )
+					for (let v = 0; v < n; v++) { X[v] = z[2*v] ; Y[v] = z[2*v+1] }
+					unit = match.repeat
+
+					// how well the cuts match now: the worst distance of any t from the lattice, in cells
+					let worst = 0.0
+					for (const e of cuts) {
+						const ct = Math.cos(e.theta), st = Math.sin(e.theta)
+						for (const [A,B] of [ [e.Aa,e.Ba], [e.Ab,e.Bb] ]) {
+							const tx = X[B] - (ct*X[A] - st*Y[A]), ty = Y[B] - (st*X[A] + ct*Y[A])
+							const l = nearest( tx, ty )
+							worst = Math.max( worst, Math.hypot( tx-l[0], ty-l[1] ) )
+						}
+					}
+					matched = { mismatch: worst, moved: moved, cells: sc*cref }
+				}
 
 				// smooth normals from the uncut grid, so the cuts do not show in the shading
 				const normal = []
@@ -1105,7 +1396,7 @@
 					normal[g].normalize()
 					positions.set( [ P[g].x, P[g].y, P[g].z ], 3*idx )
 					normals.set( [ normal[g].x, normal[g].y, normal[g].z ], 3*idx )
-					uvs.set( [ X[idx]/cref, Y[idx]/cref ], 2*idx )
+					uvs.set( [ X[idx]/unit, Y[idx]/unit ], 2*idx )
 					param_uv.set( [ Math.floor(g/nv)/nu, (g%nv)/nv ], 2*idx )
 				} )
 				const geometry = new THREE.BufferGeometry()
@@ -1113,7 +1404,77 @@
 				geometry.setAttribute( 'normal', new THREE.BufferAttribute( normals, 3 ) )
 				geometry.setAttribute( 'uv', new THREE.BufferAttribute( uvs, 2 ) )
 				geometry.setIndex( Array.from( cv ) )
-				return { geometry: geometry, param_uv: param_uv }
+				return { geometry: geometry, param_uv: param_uv, matched: matched }
+			}
+
+			// The uv map of a geometry drawn flat, as a sheet standing beside the pot: the
+			// mesh with each vertex moved to its uv position. It shares the pot's material,
+			// uvs and vertex colours, so the image or heat map appears on both. The sheet is
+			// scaled to fit, not to true size. Its outline (which includes the cuts, when
+			// the cone layout is on) is drawn dark, and cones are marked as on the pot.
+			function flatSheet( geometry, cones ) {
+				const pos = geometry.attributes.position
+				const uv = geometry.attributes.uv
+				const index = geometry.index
+				geometry.computeBoundingBox()
+				const box = geometry.boundingBox
+
+				let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity
+				for (let i = 0; i < uv.count; i++) {
+					x0 = Math.min( x0, uv.getX(i) ) ; x1 = Math.max( x1, uv.getX(i) )
+					y0 = Math.min( y0, uv.getY(i) ) ; y1 = Math.max( y1, uv.getY(i) )
+				}
+				const size = 900.0
+				const sc = size / Math.max( x1-x0, y1-y0, 1e-9 )
+				// to the right of the pot, centred on its mid height, facing the default camera
+				const cx = box.max.x + 100.0 + 0.5*sc*(x1-x0)
+				const cy = 0.5*( box.min.y + box.max.y )
+				const flat = new Float32Array( 3*uv.count )
+				const normals = new Float32Array( 3*uv.count )
+				for (let i = 0; i < uv.count; i++) {
+					flat[3*i] = cx + sc*( uv.getX(i) - 0.5*(x0+x1) )
+					flat[3*i+1] = cy + sc*( uv.getY(i) - 0.5*(y0+y1) )
+					normals[3*i+2] = 1.0
+				}
+				const g = new THREE.BufferGeometry()
+				g.setAttribute( 'position', new THREE.BufferAttribute( flat, 3 ) )
+				g.setAttribute( 'normal', new THREE.BufferAttribute( normals, 3 ) )
+				g.setAttribute( 'uv', uv )
+				if (geometry.attributes.color) { g.setAttribute( 'color', geometry.attributes.color ) }
+				g.setIndex( index )
+				const sheet = new THREE.Mesh( g, surface_material )
+
+				// outline: edges that belong to only one triangle
+				const count = new Map()
+				for (let t = 0; t < index.count; t += 3) {
+					for (let k = 0; k < 3; k++) {
+						const a = index.getX(t+k), b = index.getX(t+(k+1)%3)
+						const key = (a < b) ? a*uv.count+b : b*uv.count+a
+						count.set( key, (count.get(key) || 0) + 1 )
+					}
+				}
+				const seg = []
+				for (const [key,c] of count) {
+					if (c != 1) { continue }
+					const a = Math.floor(key/uv.count), b = key % uv.count
+					seg.push( flat[3*a], flat[3*a+1], 1.0, flat[3*b], flat[3*b+1], 1.0 )
+				}
+				const lg = new THREE.BufferGeometry()
+				lg.setAttribute( 'position', new THREE.BufferAttribute( new Float32Array(seg), 3 ) )
+				sheet.add( new THREE.LineSegments( lg, new THREE.LineBasicMaterial( { color: 0x222222 } ) ) )
+
+				// a cone on a cut appears once for each copy of its vertex
+				const p = new THREE.Vector3()
+				for (const c of cones) {
+					for (let i = 0; i < pos.count; i++) {
+						p.fromBufferAttribute( pos, i )
+						if (p.distanceToSquared( c.p ) > 1e-6) { continue }
+						const marker = new THREE.Mesh( new THREE.SphereGeometry( 9, 12, 8 ), new THREE.MeshBasicMaterial( { color: (c.sign > 0) ? 0x000000 : 0x00dd44 } ) )
+						marker.position.set( flat[3*i], flat[3*i+1], 0.0 )
+						sheet.add( marker )
+					}
+				}
+				return sheet
 			}
 
 			const CONE_U = 40
@@ -1625,6 +1986,8 @@ G1 F3360
 				} );
 				function imageChanged() {
 					updateSurfaceImage();
+					// the matched cone layout is built for a given number of repeats
+					if (params.uv_cones && params.match_seams) { updateSplineOutline(); }
 					render();
 				}
 				surface_image_controller = tex.add( params, 'surface_image' ).name( 'Show image on surface' ).onChange( imageChanged );
@@ -1641,6 +2004,8 @@ G1 F3360
 				sc.add( params, 'scale_view', [ 'off', 'uv map', 'cone metric' ] ).name( 'Show pattern size' ).onChange( scaleViewChanged );
 				sc.add( params, 'cone_order', { 'p2 (180 deg)': 2, 'p3 (120 deg)': 3, 'p4 (90 deg)': 4, 'p6 (60 deg)': 6 } ).name( 'Lattice symmetry' ).onChange( scaleViewChanged );
 				sc.add( params, 'uv_cones' ).name( 'Cone uv layout (seams show)' ).onChange( scaleViewChanged );
+				sc.add( params, 'match_seams' ).name( 'Match pattern across cuts (slow)' ).onChange( scaleViewChanged );
+				sc.add( params, 'flat_view' ).name( 'Show uv map laid flat' ).onChange( scaleViewChanged );
 				scale_stats_controller = sc.add( params, 'scale_stats' ).name( 'Size range' ).disable();
 				sc.close();
 
@@ -1767,6 +2132,9 @@ G1 F3360
 				transformControl.addEventListener( 'dragging-changed', function ( event ) {
 
 					controls.enabled = ! event.value;
+					dragging = event.value;
+					// work that was skipped during the drag
+					if (!dragging && params.uv_cones && params.match_seams) { updateSplineOutline(); render(); }
 
 				},  { passive: false } );
 				scene.add( transformControl );
@@ -1925,11 +2293,15 @@ G1 F3360
 					cm = coneMetric( fn, CONE_U, nv, params.cone_order )
 				}
 				let param_uv = null   // the surface parameters (u,v) of each vertex
+				let match_note = ''
 				if (params.uv_cones) {
 					// cone layout (experiment): the mesh is replaced by one cut open along the seams
-					const lay = coneLayout( cm )
+					// matching the pattern across the cuts takes a second or so: not while dragging
+					const match = (params.match_seams && !dragging) ? { order: params.cone_order, repeat: params.image_repeat } : null
+					const lay = coneLayout( cm, match )
 					surface.geometry = lay.geometry
 					param_uv = lay.param_uv
+					if (lay.matched) { match_note = ', matched: ' + lay.matched.cells.toFixed(1) + ' cells/turn, pulled ' + lay.matched.moved.toFixed(2) + ' cell' }
 				} else {
 					const uvmap = surfaceUV()
 					const uvpt = new THREE.Vector2()
@@ -1957,6 +2329,8 @@ G1 F3360
 					const npos = cm.cones.filter( c => c.sign > 0 ).length
 					params.scale_stats = paintLogScale( surface.geometry, phi, ls.weight ) + ', cones +' + npos + ' -' + (cm.cones.length-npos)
 				}
+				if (params.scale_view == 'off') { params.scale_stats = '' }
+				params.scale_stats += match_note
 				if (scale_stats_controller !== null) { scale_stats_controller.updateDisplay() }
 
 				surface.mesh = new THREE.Mesh( surface.geometry, surface_material );
@@ -1969,6 +2343,7 @@ G1 F3360
 					marker.position.copy( c.p )
 					surface.mesh.add( marker )
 				}
+				if (params.flat_view) { surface.mesh.add( flatSheet( surface.geometry, cone_markers ) ) }
 
 
 				if (params.bottom == true) {
@@ -2054,6 +2429,8 @@ G1 F3360
 				ppp.scale_view = params.scale_view;
 				ppp.cone_order = params.cone_order;
 				ppp.uv_cones = params.uv_cones;
+				ppp.flat_view = params.flat_view;
+				ppp.match_seams = params.match_seams;
 				ppp.set_height = params.set_height;
 				ppp.target_height = params.target_height;
 				ppp.npoints = ppp.points.length;
