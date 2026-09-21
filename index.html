@@ -126,7 +126,9 @@
 
 				surface_image: false,
 				image_repeat: 8,
-				loadImage: loadImage
+				loadImage: loadImage,
+				image_bump: false,
+				image_bump_amplitude: 1.0
 
 			};
 
@@ -182,6 +184,41 @@
 				surface_material.needsUpdate = true
 			}
 
+			// The surface image as a bump map for the toolpath: returns function(x, y) giving
+			// the density (0 = white, 1 = black) of the image at uv position (x, y), with the
+			// same repeats and orientation as updateSurfaceImage() shows it on the pot. The
+			// image is first drawn small, which blurs it a little, so that hard edges in
+			// the image become ramps the printer can follow; lookups are bilinear.
+			function imageDensity() {
+				if (surface_image === null) { surface_image = checkerTexture() }
+				const img = surface_image.image
+				const aspect = (img.width > 0 && img.height > 0) ? img.width/img.height : 1.0
+				const W = Math.max( 2, Math.min( 256, img.width ) )
+				const H = Math.max( 2, Math.round( W/aspect ) )
+				const c = document.createElement( 'canvas' )
+				c.width = W
+				c.height = H
+				const ctx = c.getContext( '2d' )
+				ctx.fillStyle = '#ffffff'   // transparent parts of an image count as white
+				ctx.fillRect( 0, 0, W, H )
+				ctx.drawImage( img, 0, 0, W, H )
+				const rgba = ctx.getImageData( 0, 0, W, H ).data
+				const density = new Float32Array( W*H )
+				for (let k = 0; k < W*H; k++) {
+					density[k] = 1.0 - ( 0.2126*rgba[4*k] + 0.7152*rgba[4*k+1] + 0.0722*rgba[4*k+2] )/255.0
+				}
+				const rx = params.image_repeat, ry = params.image_repeat*aspect
+				return function( x, y ) {
+					// texel centres; uv y runs up the image, canvas rows run down
+					let fx = ( x*rx - Math.floor(x*rx) )*W - 0.5
+					let fy = ( 1.0 - ( y*ry - Math.floor(y*ry) ) )*H - 0.5
+					const x0 = Math.floor(fx), y0 = Math.floor(fy)
+					const a = fx-x0, b = fy-y0
+					const xa = (x0+W)%W, xb = (x0+1+W)%W, ya = (y0+H)%H, yb = (y0+1+H)%H
+					return (1-b)*( (1-a)*density[ya*W+xa] + a*density[ya*W+xb] ) + b*( (1-a)*density[yb*W+xa] + a*density[yb*W+xb] )
+				}
+			}
+
 			function loadImage() {
 				const input = document.createElement( 'input' )
 				input.type = 'file'
@@ -197,6 +234,7 @@
 						params.surface_image = true
 						if (surface_image_controller !== null) { surface_image_controller.updateDisplay() }
 						updateSurfaceImage()
+						if (params.image_bump && params.spiralize) { updateSplineOutline() }
 						render()
 					} )
 				}
@@ -780,7 +818,12 @@
 				const texture_amp = params.texture_amplitude / scale_fact
 				// conformal option: take both coordinates from the conformal uv map and use the
 				// same number of periods in each, giving a grid of square bumps.
-				const uvmap = (texture_on && params.texture_conformal) ? surfaceUV() : null
+				// image bump: push the path out (or in, for a negative amplitude) in proportion
+				// to the density of the surface image at that point of the pot.
+				const bump_on = params.image_bump && params.image_bump_amplitude != 0.0
+				const bump_amp = params.image_bump_amplitude / scale_fact
+				const density = bump_on ? imageDensity() : null
+				const uvmap = ( (texture_on && params.texture_conformal) || bump_on ) ? surfaceUV() : null
 				const uvpt = new THREE.Vector2()
 
 				var points = tv.map( function(t) {
@@ -789,18 +832,21 @@
 					return( [t,v]  )
 				} ).map( function([u,v]) {
 					fn(u,v%1.0,p)
-					if (texture_on) {
+					if (texture_on || bump_on) {
 						const r = Math.sqrt( p.x*p.x + p.z*p.z )
 						if (r > 0.0) {
 							let s = 0.0
-							if (uvmap) {
-								// the map wants v in 0..1; add the whole turns back so v stays unwrapped
-								const vm = v - Math.floor(v)
-								uvmap( u, vm, uvpt )
+							// the map wants v in 0..1; add the whole turns back so v stays unwrapped
+							const vm = v - Math.floor(v)
+							if (uvmap) { uvmap( u, vm, uvpt ) }
+							if (!texture_on) {
+								// no sine wave
+							} else if (params.texture_conformal) {
 								s = texture_amp * Math.sin( 2.0*Math.PI * texture_periods * ( uvpt.x + (v-vm) ) ) * Math.sin( 2.0*Math.PI * texture_periods * uvpt.y )
 							} else {
 								s = texture_amp * Math.sin( 2.0*Math.PI * texture_periods * v )
 							}
+							if (bump_on) { s += bump_amp * density( uvpt.x, uvpt.y ) }
 							const rs = Math.max( 0.0, r + s ) / r
 							p.x *= rs
 							p.z *= rs
@@ -1145,11 +1191,15 @@ G1 F3360
 				} );
 				function imageChanged() {
 					updateSurfaceImage();
+					// the repeats also place the image for the toolpath bump
+					if (params.image_bump && params.spiralize) { updateSplineOutline(); }
 					render();
 				}
 				surface_image_controller = tex.add( params, 'surface_image' ).name( 'Show image on surface' ).onChange( imageChanged );
 				tex.add( params, 'image_repeat', 1, 40 ).name( 'Image repeats per turn' ).step( 1 ).onChange( imageChanged );
 				tex.add( params, 'loadImage' ).name( 'Load image...' );
+				tex.add( params, 'image_bump' ).name( 'Image bumps the toolpath' ).onChange( textureChanged );
+				tex.add( params, 'image_bump_amplitude', -5.0, 5.0 ).name( 'Bump, black (mm)' ).step( 0.1 ).onChange( textureChanged );
 				tex.close();
 
 				let h = gui.addFolder( 'Export' );
@@ -1521,6 +1571,8 @@ G1 F3360
 				ppp.uv_lscm = params.uv_lscm;
 				ppp.surface_image = params.surface_image;
 				ppp.image_repeat = params.image_repeat;
+				ppp.image_bump = params.image_bump;
+				ppp.image_bump_amplitude = params.image_bump_amplitude;
 				ppp.set_height = params.set_height;
 				ppp.target_height = params.target_height;
 				ppp.npoints = ppp.points.length;
