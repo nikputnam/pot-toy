@@ -46,7 +46,7 @@
 			 *   params                    every user setting and its default
 			 *   sor(), facet()            the pot surface as a parametric function fn(u, v, pt)
 			 *   bbox(), scale_factor()    size of the pot and scene-units-to-mm scale for export
-			 *   bottomRaster(), bottomPath(), spiralPath()   the printer toolpath
+			 *   bottomOutline(), rasterLayer(), bottomPath(), spiralPath()   the printer toolpath
 			 *   exportGcode(), exportToObj(), exportJson()   file exports
 			 *   init()                    scene, camera, lights, the GUI panel, control points
 			 *   updateSplineOutline()     rebuilds the mesh (and toolpath preview) after any change
@@ -590,128 +590,225 @@
 
 			*/
 
-			// Serpentine raster that fills the (squashed) disk of radius R at height y.
-			// Rows run parallel to x, one line width apart. The path starts and ends at
-			// the center so it joins the inward spiral before it and the outward spiral
-			// after it. Each half of the disk (z >= 0, then z < 0) is covered as: half a
-			// row out from the center, an arc along the perimeter up to the pole, a
-			// serpentine back down through every row, and the other half of the first
-			// row into the center. Rows are inset one line width on the side the arc
-			// runs along, so nothing crosses.
-			function bottomRaster(R, lw, y) {
-
-				const zmax = params.squash * R
-				const outer = function(k) {
-					const zz = k*lw / params.squash
-					return ( Math.abs(zz) < R ) ? Math.sqrt( R*R - zz*zz ) : 0.0
-				}
-				const dphi = 2.0*Math.PI / 360.0
-
-				const pts = []
-				const push = function(p) {
-					if ( pts.length == 0 || pts[pts.length-1].distanceTo(p) > 1e-9 ) pts.push( p )
-				}
-				const pt = function(x, k) { push( new THREE.Vector3( x, y, k*lw ) ) }
-
-				// h: row index of the half rows (0 for the +z half, -1 for the -z half)
-				// s: direction of travel in z (+1 or -1)
-				// a: side (+1 or -1 in x) the perimeter arc runs along
-				const half = function(h, s, a) {
-					// full rows k = h + s*j, j = 1 .. n, all inside the disk
-					const n = Math.ceil( zmax/lw - Math.abs(h) ) - 1
-					// row end on the arc side is inset one line width; the far side reaches the perimeter
-					const end = function(k, side) { return ( side == a ) ? Math.max( 0.0, outer(k) - lw ) : outer(k) }
-					// the last row visited (h+s) must end on the far side: n rows flip the side n times
-					const start = ( n % 2 == 0 ) ? -a : a
-					const K = h + s*n
-
-					pt( 0.0, 0 )
-					pt( 0.0, h )
-					pt( a*end(h, a), h )
-
-					// perimeter arc: x = a*R*cos(phi), z = zmax*sin(phi), from row h to the top row
-					const phi_h = Math.asin( h*lw / zmax )
-					const phi_K = Math.asin( K*lw / zmax )
-					const phi_end = ( start == a ) ? phi_K : s*Math.PI - phi_K
-					const n_arc = Math.max( 1, Math.ceil( Math.abs(phi_end - phi_h) / dphi ) )
-					for (let i = 0; i <= n_arc; i++) {
-						const phi = phi_h + (phi_end - phi_h) * i / n_arc
-						push( new THREE.Vector3( a*R*Math.cos(phi), y, zmax*Math.sin(phi) ) )
-					}
-
-					var side = start
-					for (let j = n; j >= 1; j--) {
-						const k = h + s*j
-						pt(  side*end(k,  side), k )
-						pt( -side*end(k, -side), k )
-						side = -side
-					}
-					pt( -a*end(h, -a), h )
-					pt( 0.0, h )
-					pt( 0.0, 0 )
-				}
-
-				half( 0, 1, 1 )
-				half( -1, -1, -1 )
-
-				return pts
+			// Outline of the bottom of the pot: the ring fn(0, v) as [x, z] pairs, moved
+			// outward by d along the vertex normals. It runs the same way as v.
+			function bottomOutline( fn, d ) {
+				const N = 720
+				const p = new THREE.Vector3()
+				const P = []
+				for (let i = 0; i < N; i++) { fn( 0.0, i/N, p ); P.push( [p.x, p.z] ) }
+				// signed area: positive when the points run counterclockwise in (x, z)
+				let area = 0.0
+				for (let i = 0; i < N; i++) { const a = P[i], b = P[(i+1)%N]; area += a[0]*b[1] - b[0]*a[1] }
+				const sgn = area > 0 ? 1.0 : -1.0
+				// outward normal of edge i, from P[i] to P[i+1]
+				const en = P.map( function( a, i ) {
+					const b = P[(i+1)%N]
+					const dx = b[0]-a[0], dz = b[1]-a[1]
+					const l = Math.hypot( dx, dz ) || 1.0
+					return [ sgn*dz/l, -sgn*dx/l ]
+				} )
+				return P.map( function( a, i ) {
+					const n0 = en[(i+N-1)%N], n1 = en[i]
+					let nx = n0[0]+n1[0], nz = n0[1]+n1[1]
+					const l = Math.hypot( nx, nz ) || 1.0
+					nx /= l; nz /= l
+					// miter: at a corner the vertex moves further so both edges move by d
+					const c = Math.max( 0.5, nx*n1[0] + nz*n1[1] )
+					return [ a[0] + d*nx/c, a[1] + d*nz/c ]
+				} )
 			}
 
-			function bottomPath(r0,total_length,scale_fact) {
+			// Paths along and inside the closed polygon P ([x, z] pairs). A point on the
+			// boundary is given by s = i + t, a fraction t along edge i from P[i] to P[i+1].
+			function polygonPaths( P ) {
+				const N = P.length
+				const C = [0.0]
+				for (let i = 0; i < N; i++) { const a = P[i], b = P[(i+1)%N]; C.push( C[i] + Math.hypot( b[0]-a[0], b[1]-a[1] ) ) }
+				const L = C[N]
+				// i + t can round up to N on the last edge
+				const edge = s => Math.min( Math.floor(s), N-1 )
+				const at = function( s ) {
+					const i = edge(s), t = s-i, a = P[i], b = P[(i+1)%N]
+					return [ a[0] + t*(b[0]-a[0]), a[1] + t*(b[1]-a[1]) ]
+				}
+				const pos = function( s ) { const i = edge(s); return C[i] + (s-i)*(C[i+1]-C[i]) }
+				const orient = (a,b,c) => (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])
 
-				const length_samples = surface.spline.points.length * 10
-				const dt = 1.0/(length_samples-1)
-				const n_layers = Math.floor(total_length/(params.layer_height/scale_fact))
-				const n_angular_steps = 1000
-				const n = n_layers*n_angular_steps
-
-				var p0 = new THREE.Vector3(0,0,0)
-
-				//fn(0,0,p0)
-				var p1 = p0.clone()
-
-				p0.x = 0.0 
-				p0.z = 0.0
-
-				//const r0 = p0.distanceTo(p1)
-				const lw = (params.line_width / scale_fact)
-				r0 += params.line_width/scale_fact
-				const turns = r0 / lw
-				const ns = Math.floor(turns * n_angular_steps )
-				console.log(ns,turns,lw,r0)
-				const dtheta = 2*Math.PI / n_angular_steps
-				var theta = -(turns % 1.0)*2.0*Math.PI
-				var dr = r0 / ns
-				var r = r0
-				var yl = p0.y
-				//console.log( "tail:",-lw*3*Math.sin(theta+Math.PI/2),p0.y, -lw*3*Math.cos(theta) )
-				//const ptail = new THREE.Vector3( -lw*3*Math.sin(theta+Math.PI/2),p0.y, lw*3*Math.cos(theta+Math.PI/2) )
-				const ptail = new THREE.Vector3( r*Math.cos(theta) -lw*3,p0.y, params.squash* r*Math.sin(theta) - 3*lw )
-				var sp_in = [...Array(ns).keys()].map( x => x*dt).map(
-					function(x) {
-						var p = new THREE.Vector3( r*Math.cos(theta),yl,params.squash* r*Math.sin(theta) )
-						theta += dtheta
-						r -= dr
-						return p
+				function inside( x, z ) {
+					let c = false
+					for (let i = 0; i < N; i++) {
+						const a = P[i], b = P[(i+1)%N]
+						if ( (a[1] <= z) != (b[1] <= z) && x < a[0] + (z-a[1])/(b[1]-a[1])*(b[0]-a[0]) ) { c = !c }
 					}
-				)
-				// middle layer: back-and-forth raster filling the base
-				yl += params.layer_height/scale_fact
-				const raster = bottomRaster( r0 - lw/2.0, lw, yl )
+					return c
+				}
 
-				var theta = -(turns % 1.0)*2.0*Math.PI
-				var r = 0
-				//					yl *= 2.0 //params.layer_height
-				yl += params.layer_height/scale_fact
-				var sp_out = [...(Array(ns- Math.floor(params.line_width/scale_fact/dr)).keys()  )].map( x => x*dt).map(
-					function(x) {
-						var p = new THREE.Vector3( r*Math.cos(theta),yl,params.squash* r*Math.sin(theta) )
-						theta += dtheta
-						r += dr
-						return p
+				// is the straight line between boundary points sA and sB inside the polygon?
+				function clear( sA, sB ) {
+					const a = at(sA), b = at(sB)
+					if ( !inside( 0.5*(a[0]+b[0]), 0.5*(a[1]+b[1]) ) ) { return false }
+					const ia = edge(sA), ib = edge(sB)
+					const near = (i,j) => Math.min( (i-j+N)%N, (j-i+N)%N ) <= 1
+					for (let i = 0; i < N; i++) {
+						// the edges at the ends touch the line there
+						if ( near(i,ia) || near(i,ib) ) { continue }
+						const p = P[i], q = P[(i+1)%N]
+						if ( orient(a,b,p)*orient(a,b,q) < 0 && orient(p,q,a)*orient(p,q,b) < 0 ) { return false }
 					}
-				)
-				return [ptail].concat( sp_in, raster, sp_out )
+					return true
+				}
+
+				// from sA to sB along the boundary, the shorter way round; the points after A
+				function walk( sA, sB ) {
+					const ia = edge(sA), ib = edge(sB)
+					const fwd = ( pos(sB) - pos(sA) + L ) % L
+					const out = []
+					if ( fwd <= L - fwd ) {
+						let k = ( ib - ia + N ) % N
+						if ( k == 0 && sB < sA ) { k = N }
+						for (let j = 1; j <= k; j++) { out.push( P[(ia+j)%N] ) }
+					} else {
+						let m = ( ia - ib + N ) % N
+						if ( m == 0 && sB > sA ) { m = N }
+						for (let j = 0; j < m; j++) { out.push( P[(ia-j+N)%N] ) }
+					}
+					out.push( at(sB) )
+					return out
+				}
+
+				// a path from sA to sB that stays in the polygon: along the boundary, unless
+				// a straight line inside is much shorter. Returns the points after A.
+				function link( sA, sB ) {
+					const w = walk( sA, sB )
+					let wl = 0.0, q = at(sA)
+					for (const p of w) { wl += Math.hypot( p[0]-q[0], p[1]-q[1] ); q = p }
+					const a = at(sA), b = at(sB)
+					const sl = Math.hypot( b[0]-a[0], b[1]-a[1] )
+					if ( wl > 1.5*sl && clear( sA, sB ) ) { return { path: [b], length: sl } }
+					return { path: w, length: wl }
+				}
+
+				return { at: at, link: link }
+			}
+
+			// One raster layer filling the polygon P ([x, z] pairs) with rows parallel to x,
+			// about lw apart. Where the outline is not convex a row can cross it several
+			// times, so a row is a list of segments. Segments that overlap in successive
+			// rows are chained into a serpentine, the chains are visited nearest first,
+			// and every move between rows or chains stays inside the outline, so the
+			// continuous extrusion never draws outside it. from: [x, z] to start near, or
+			// null. close: end at the boundary point s = 0, where the wall starts.
+			// Returns the path as [x, z] pairs.
+			function rasterLayer( P, lw, from, close ) {
+				const N = P.length
+				const tools = polygonPaths( P )
+				let zmin = Infinity, zmax = -Infinity
+				for (const p of P) { zmin = Math.min( zmin, p[1] ); zmax = Math.max( zmax, p[1] ) }
+				const nrows = Math.round( (zmax-zmin)/lw )
+				if ( nrows < 1 ) { return [] }
+				const dz = (zmax-zmin)/nrows
+
+				const rows = []
+				for (let k = 0; k < nrows; k++) {
+					const z = zmin + (k+0.5)*dz
+					const hits = []
+					for (let i = 0; i < N; i++) {
+						const a = P[i], b = P[(i+1)%N]
+						if ( (a[1] <= z) != (b[1] <= z) ) {
+							const t = (z-a[1])/(b[1]-a[1])
+							hits.push( { x: a[0] + t*(b[0]-a[0]), s: i+t } )
+						}
+					}
+					hits.sort( (h1,h2) => h1.x - h2.x )
+					const segs = []
+					for (let j = 0; j+1 < hits.length; j += 2) { segs.push( { lo: hits[j], hi: hits[j+1], used: false } ) }
+					rows.push( segs )
+				}
+
+				// a chain's first row runs lo to hi, the next hi to lo, and so on. A row only
+				// joins the chain if the move to it is short: where the outline forks, the
+				// way round to the second branch is long, and that branch starts a new chain.
+				const chains = []
+				for (let k = 0; k < nrows; k++) {
+					for (const seg of rows[k]) {
+						if ( seg.used ) { continue }
+						seg.used = true
+						const ends = [ seg.lo, seg.hi ]
+						let cur = seg
+						for (let kk = k+1; kk < nrows; kk++) {
+							const side = ( ends.length % 4 == 2 ) ? 'hi' : 'lo'
+							const next = rows[kk].find( t => !t.used && t.lo.x < cur.hi.x && t.hi.x > cur.lo.x &&
+								tools.link( cur[side].s, t[side].s ).length < 2.0*( dz + Math.abs( cur[side].x - t[side].x ) ) )
+							if ( !next ) { break }
+							next.used = true
+							ends.push( next[side], next[ side == 'hi' ? 'lo' : 'hi' ] )
+							cur = next
+						}
+						chains.push( ends )
+					}
+				}
+
+				const out = []
+				const done = chains.map( () => false )
+				let here = from
+				let last = null
+				for (let c = 0; c < chains.length; c++) {
+					// the nearest chain end; a chain can be run backwards
+					let best = 0, rev = false, bd = Infinity
+					chains.forEach( function( q, i ) {
+						if ( done[i] ) { return }
+						for (const r of [false, true]) {
+							const p = tools.at( ( r ? q[q.length-1] : q[0] ).s )
+							const d = here ? Math.hypot( p[0]-here[0], p[1]-here[1] ) : 0.0
+							if ( d < bd ) { bd = d; best = i; rev = r }
+						}
+					} )
+					done[best] = true
+					const q = rev ? chains[best].slice().reverse() : chains[best]
+					if ( last === null ) { out.push( tools.at( q[0].s ) ) }
+					else { out.push( ...tools.link( last.s, q[0].s ).path ) }
+					// q[0] to q[1] is a row, q[1] to q[2] a move to the next row, ...
+					for (let j = 1; j < q.length; j++) {
+						if ( j % 2 == 1 ) { out.push( tools.at( q[j].s ) ) }
+						else { out.push( ...tools.link( q[j-1].s, q[j].s ).path ) }
+					}
+					last = q[q.length-1]
+					here = tools.at( last.s )
+				}
+				if ( close ) { out.push( ...tools.link( last.s, 0.0 ).path ) }
+				return out
+			}
+
+			// The three bottom layers, at heights 0, 1 and 2 layer heights: raster fills of
+			// the bottom outline with rows alternating between the x and z directions. The
+			// last layer ends where the wall starts, fn(0, 0).
+			function bottomPath( fn, scale_fact ) {
+
+				const lw = params.line_width / scale_fact
+				const lh = params.layer_height / scale_fact
+				// rows reach half a line width past the center line of the wall
+				const outline = bottomOutline( fn, 0.5*lw )
+
+				const pts = []
+				for (let layer = 0; layer < 3; layer++) {
+					// rotate the outline so the rows of this layer run along x
+					const a = ( layer % 2 ) * 0.5*Math.PI
+					const ca = Math.cos(a), sa = Math.sin(a)
+					const P = outline.map( p => [ p[0]*ca + p[1]*sa, -p[0]*sa + p[1]*ca ] )
+					const h = pts.length > 0 ? pts[pts.length-1] : null
+					const from = h ? [ h.x*ca + h.z*sa, -h.x*sa + h.z*ca ] : null
+					const path = rasterLayer( P, lw, from, layer == 2 )
+					for (const p of path) { pts.push( new THREE.Vector3( p[0]*ca - p[1]*sa, layer*lh, p[0]*sa + p[1]*ca ) ) }
+				}
+
+				// lead in from three line widths outside the first point
+				if ( pts.length > 0 ) {
+					const p = pts[0]
+					const r = Math.hypot( p.x, p.z )
+					if ( r > 0.0 ) { pts.unshift( new THREE.Vector3( p.x*(1.0 + 3.0*lw/r), p.y, p.z*(1.0 + 3.0*lw/r) ) ) }
+				}
+				return pts
 
 			}
 
@@ -1016,18 +1113,8 @@
 				var sp = []
 				if (params.bottom) {
 
-//					fn(0,0,p0)
-					var p1 = p0.clone()
-
-					p0.x = 0.0 
-					p0.z = 0.0
-
-					const r0 = p0.distanceTo(p1)
-					console.log("sp")
-					var bottom_points = bottomPath(r0,total_length,scale_fact).map( function(p) { p.y += p0.y; return p } )
-					//console.log("z")
-					//points.map(  function(p) { p.y += params.layer_height/scale_fact }  )
-					bottom_points.map( function(p) { p.y -= 2.0*params.layer_height/scale_fact } )
+					// the last bottom layer is level with the start of the wall
+					var bottom_points = bottomPath( fn, scale_fact ).map( function(p) { p.y += p0.y - 2.0*params.layer_height/scale_fact; return p } )
 					//points = bottom_points.concat(points.map ( function(p) { p.y += params.layer_height/scale_fact } ) )
 					points = bottom_points.concat(points )
 					//					points = [ptail].concat( sp_in.concat( sp_out.concat(points ) ) )
@@ -1055,7 +1142,7 @@
 //				const ty = 0
 				var tz = params.bed_height + params.layer_height
 				if (params.bottom) {
-					// inward spiral, raster, outward spiral: three bottom layers under the wall
+					// three raster layers of bottom under the wall
 					tz = params.bed_height + 3.0*params.layer_height
 				}
 				const sppoints = spiralPath( scale_factor() ).map(function(p) { 

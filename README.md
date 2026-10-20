@@ -42,7 +42,8 @@ not work. Any recent Chrome, Firefox or Safari is fine.
 ## G-code
 
 The exported G-code is a single continuous spiral: the bottom is printed as
-an inward spiral, a serpentine raster fill and an outward spiral, then the
+three raster layers that fill the pot's bottom outline, with the rows turned
+90 degrees in each layer, then the
 wall rises one layer height per turn with no seams. By default the model is
 scaled to fit within a 100 mm box. The header and footer at the bottom of
 `exportGcode()` in `index.html` are written for a specific clay printer;
