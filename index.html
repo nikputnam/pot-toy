@@ -130,7 +130,12 @@
 				image_repeat: 8,
 				loadImage: loadImage,
 				image_bump: false,
-				image_bump_amplitude: 1.0
+				image_bump_amplitude: 1.0,
+
+				loft: false,
+				addSection: addSection,
+				removeSection: removeSection,
+				resetSections: resetSections
 
 			};
 
@@ -329,14 +334,164 @@
 				}
 			}
 
+			// Loft mode: the pot is a stack of closed planar sections instead of a
+			// revolved profile. sections[k] is a ring of handle meshes, all at one height.
+			// The j-th handles of all sections are joined by a column curve; at height u
+			// the ring through the column points is interpolated around the pot at v.
+			// Columns are uniform Catmull-Rom, whose weights depend only on u, so every
+			// column is at the same height at a given u and the in-between rings stay
+			// planar, which the spiral toolpath relies on.
+			const sections = []
+			const LOFT_POINTS = 8
+			let loftRings = null
+			// Editing: a section's handles are hidden until a click on its outline selects
+			// it. The gizmo then moves the whole section through sectionPivot, an empty
+			// object at its center; a click on one of its handles moves just that point.
+			let selectedSection = null
+			const sectionPivot = new THREE.Object3D()
+			const pivotLast = new THREE.Vector3()
+
+			function loftColumns() {
+				// lowest section first; it is the bottom
+				const sorted = sections.slice().sort( (a,b) => a[0].position.y - b[0].position.y )
+				const columns = []
+				for (let j = 0; j < sorted[0].length; j++) {
+					const c = new THREE.CatmullRomCurve3( sorted.map( s => s[j].position ) )
+					c.curveType = 'catmullrom'
+					columns.push( c )
+				}
+				return columns
+			}
+
+			function loft( columns, squash ) {
+				const ring_points = columns.map( () => new THREE.Vector3() )
+				const ring = new THREE.CatmullRomCurve3( ring_points, true, 'centripetal' )
+				return function( u, v, pt ) {
+					for (let j = 0; j < columns.length; j++) { columns[j].getPoint( u, ring_points[j] ) }
+					ring.getPoint( v - Math.floor(v), pt )
+					pt.z *= squash
+				}
+			}
+
+			// The current pot surface fn(u, v, pt), with the shape options applied.
+			function surfaceFn() {
+				let fn = params.loft ? loft( surface.columns, params.squash ) : sor( surface.spline, params.squash );
+				if (params.facet == true) {
+					fn = facet( fn, params.n_facets, params.twist, params.puff ) ;
+				}
+				return fn
+			}
+
+			function addSectionHandles( pts ) {
+				const ring = pts.map( function( p, j ) {
+					const object = new THREE.Mesh( geometry, j==0 ? handle_material1 : handle_material );
+					object.position.set( p.x, p.y, p.z );
+					object.visible = false;
+					scene.add( object );
+					return object
+				} )
+				sections.push( ring )
+				return ring
+			}
+
+			function clearSections() {
+				selectSection( null )
+				for (const ring of sections) {
+					for (const object of ring) {
+						if ( transformControl.object === object ) transformControl.detach();
+						scene.remove( object );
+					}
+				}
+				sections.length = 0
+			}
+
+			// one circular section per profile control point, so the loft starts out
+			// close to the current pot
+			function seedSections() {
+				clearSections()
+				for (const p of positions) {
+					// a ring of coincident points has no tangents, so keep a small radius
+					const r = Math.max( Math.abs(p.x), 1.0 )
+					addSectionHandles( [...Array(LOFT_POINTS).keys()].map( j => new THREE.Vector3(
+						r*Math.cos( 2.0*Math.PI*j/LOFT_POINTS ), p.y, r*Math.sin( 2.0*Math.PI*j/LOFT_POINTS ) ) ) )
+				}
+			}
+
+			function addSection() {
+				if (!params.loft) { return }
+				// a copy of the top section, raised by the spacing below it
+				const sorted = sections.slice().sort( (a,b) => a[0].position.y - b[0].position.y )
+				const top = sorted[ sorted.length-1 ]
+				const below = sorted[ sorted.length-2 ]
+				const gap = Math.max( top[0].position.y - below[0].position.y, 50.0 )
+				selectSection( addSectionHandles( top.map( h => new THREE.Vector3( h.position.x, h.position.y + gap, h.position.z ) ) ) )
+				updateSplineOutline();
+				render();
+			}
+
+			// removes the selected section, or the top one if none is selected
+			function removeSection() {
+				if (!params.loft || sections.length <= 2) { return }
+				const sorted = sections.slice().sort( (a,b) => a[0].position.y - b[0].position.y )
+				const top = selectedSection !== null ? selectedSection : sorted[ sorted.length-1 ]
+				selectSection( null )
+				for (const object of top) {
+					if ( transformControl.object === object ) transformControl.detach();
+					scene.remove( object );
+				}
+				sections.splice( sections.indexOf( top ), 1 )
+				updateSplineOutline();
+				render();
+			}
+
+			function resetSections() {
+				if (!params.loft) { return }
+				seedSections()
+				updateSplineOutline();
+				render();
+			}
+
+			// a section stays planar: moving one handle up or down moves its whole ring
+			function levelSection( object ) {
+				for (const ring of sections) {
+					if (ring.includes( object )) {
+						for (const h of ring) { h.position.y = object.position.y }
+					}
+				}
+			}
+
+			// show the handles of the current mode only; in loft mode, only those of the
+			// selected section
+			function showHandles() {
+				transformControl.detach();
+				transformControl.showZ = params.loft;
+				for (const h of splineHelperObjects) { h.visible = !params.loft }
+				for (const ring of sections) { for (const h of ring) { h.visible = params.loft && ring === selectedSection } }
+			}
+
+			// select a section (null for none) and put the gizmo on its center
+			function selectSection( ring ) {
+				selectedSection = ring
+				showHandles()
+				if (ring !== null) {
+					sectionPivot.position.set( 0, 0, 0 )
+					for (const h of ring) { sectionPivot.position.add( h.position ) }
+					sectionPivot.position.divideScalar( ring.length )
+					pivotLast.copy( sectionPivot.position )
+					transformControl.attach( sectionPivot )
+				}
+			}
+
+			// the gizmo moved the pivot: move the selected section with it
+			function moveSection() {
+				const d = sectionPivot.position.clone().sub( pivotLast )
+				for (const h of selectedSection) { h.position.add( d ) }
+				pivotLast.copy( sectionPivot.position )
+			}
+
 			function bbox() {
 
-				var fn =  sor(surface.spline, params.squash);
-				if (params.facet == true) { 
-					//log("faceting on: ", fn); 
-					fn = facet(sor(surface.spline, params.squash), params.n_facets, params.twist, params.puff  ) ;
-					//log("faceting on:- ", fn); 
-				}
+				var fn = surfaceFn();
 
 				const nu = surface.spline.points.length * 10
 				const nv = 60 
@@ -745,11 +900,11 @@
 			// (turns around) and out.y (conformal height, same units). v must be in 0..1.
 			// Closed form by default; LSCM when params.uv_lscm is on.
 			function surfaceUV() {
-				if (params.uv_lscm) {
-					let fn = sor(surface.spline, params.squash);
+				// the closed form is for a surface of revolution only
+				if (params.uv_lscm || params.loft) {
+					let fn = surfaceFn();
 					let nv = LSCM_V
 					if (params.facet == true) {
-						fn = facet(sor(surface.spline, params.squash), params.n_facets, params.twist, params.puff  ) ;
 						// put grid columns on the facet edges
 						nv = params.n_facets * Math.ceil( LSCM_V/params.n_facets )
 					}
@@ -803,12 +958,7 @@
 				//console.log("da",da)
 			//	console.log("twist",params.twist)
 
-				let fn =  sor(surface.spline, params.squash);
-				if (params.facet == true) { 
-					//log("faceting on: ", fn); 
-					fn = facet(sor(surface.spline, params.squash), params.n_facets, params.twist, params.puff  ) ;
-					//log("faceting on:- ", fn); 
-				}
+				let fn = surfaceFn();
 
 				var p = new THREE.Vector3(0, 0, 0)
 
@@ -1047,7 +1197,7 @@ G1 F3360
 				const fields = [ 'bottom', 'facet', 'n_facets', 'twist', 'squash', 'puff',
 					'texture', 'texture_amplitude', 'texture_periods', 'texture_fraction',
 					'texture_conformal', 'uv_lscm', 'surface_image', 'image_repeat',
-					'image_bump', 'image_bump_amplitude', 'set_height', 'target_height' ];
+					'image_bump', 'image_bump_amplitude', 'set_height', 'target_height', 'loft' ];
 				for ( const f of fields ) {
 					if ( model[ f ] !== undefined ) { params[ f ] = model[ f ] }
 				}
@@ -1058,7 +1208,15 @@ G1 F3360
 					if ( m ) { params[ m[1] ] = parseFloat( m[2] ) }
 				}
 
+				if ( Array.isArray( model.sections ) && model.sections.length >= 2 ) {
+					clearSections();
+					for ( const ring of model.sections ) { addSectionHandles( ring ) }
+				} else if ( params.loft ) {
+					params.loft = false;
+				}
+
 				load( model.points.map( p => new THREE.Vector3( p.x, p.y, 0 ) ) );
+				showHandles();
 				updateSurfaceImage();
 				gui.controllersRecursive().forEach( c => c.updateDisplay() );
 				render();
@@ -1240,6 +1398,18 @@ G1 F3360
 				gui.add( params, 'addPoint' );
 				gui.add( params, 'removePoint' );
 
+				let lft = gui.addFolder( 'Loft (experimental)' );
+				lft.add( params, 'loft' ).name( 'Loft between sections' ).onChange( function() {
+					if (params.loft && sections.length == 0) { seedSections() }
+					selectSection( null );
+					updateSplineOutline();
+					render();
+				} );
+				lft.add( params, 'addSection' ).name( 'Add section' );
+				lft.add( params, 'removeSection' ).name( 'Remove section' );
+				lft.add( params, 'resetSections' ).name( 'Reset sections from profile' );
+				lft.close();
+
 				let tex = gui.addFolder( 'Texture' );
 				function textureChanged() {
 					if (params.spiralize) {
@@ -1396,15 +1566,19 @@ G1 F3360
 
 				},  { passive: false } );
 				scene.add( transformControl );
+				scene.add( sectionPivot );
 				//transformControl.update();
 
 				transformControl.addEventListener( 'objectChange', function () {
 
+					if (transformControl.object === sectionPivot) { moveSection() }
+					else if (params.loft) { levelSection( transformControl.object ) }
 					updateSplineOutline();
 
 				} );
 				controls.update();
 
+				document.addEventListener( 'pointerdown', loftPickHandle, true );
 				document.addEventListener( 'pointerdown', onPointerDown );
 				document.addEventListener( 'pointerup', onPointerUp );
 				document.addEventListener( 'pointermove', onPointerMove );
@@ -1453,6 +1627,7 @@ G1 F3360
 
 				object.castShadow = true;
 				object.receiveShadow = true;
+				object.visible = !params.loft;
 				scene.add( object );
 				splineHelperObjects.push( object );
 				return object;
@@ -1527,15 +1702,14 @@ G1 F3360
 				scene.remove(surface.mesh);
 				surface.spline = splines.centripetal;//['centripital'];
 				//console.log( "spline:", surface.spline );
-
-
-				let fn =  sor(surface.spline, params.squash);
-				if (params.facet == true) { 
-					//log("faceting on: ", fn); 
-					fn = facet(sor(surface.spline, params.squash), params.n_facets, params.twist, params.puff  ) ;
-					//log("faceting on:- ", fn); 
-
+				if (params.loft) {
+					surface.columns = loftColumns();
+					// the v = 0 line stands in for the profile, e.g. for the layer count in spiralPath()
+					surface.spline = surface.columns[0];
 				}
+
+
+				let fn = surfaceFn();
 				//surface.geometry = new ParametricGeometry( fn , ARC_SEGMENTS, ANGLE_SEGMENTS );
 
 				surface.geometry = new ParametricGeometry( fn , ARC_SEGMENTS, ANGLE_SEGMENTS );
@@ -1592,6 +1766,23 @@ G1 F3360
 
 				scene.add(surface.mesh);
 
+				// outlines of the sections, drawn through the surface so the back ones show
+				if (loftRings !== null) { scene.remove( loftRings ); loftRings = null }
+				if (params.loft) {
+					loftRings = new THREE.Group();
+					const ring_material = new THREE.LineBasicMaterial( { color: 0xff0000, depthTest: false, transparent: true, opacity: 0.6 } );
+					const selected_material = new THREE.LineBasicMaterial( { color: 0xff8800, depthTest: false } );
+					for (const ring of sections) {
+						const c = new THREE.CatmullRomCurve3( ring.map( h => h.position ), true, 'centripetal' );
+						const line = new THREE.LineLoop( new THREE.BufferGeometry().setFromPoints( c.getPoints( 100 ) ),
+							ring === selectedSection ? selected_material : ring_material );
+						// for picking in onPointerDown()
+						line.userData.section = ring;
+						loftRings.add( line );
+					}
+					scene.add( loftRings );
+				}
+
 				if (params.spiralize) {
 					const line_material = new THREE.LineBasicMaterial( { color: 0x0000ff } );
 
@@ -1644,6 +1835,10 @@ G1 F3360
 				ppp.image_bump_amplitude = params.image_bump_amplitude;
 				ppp.set_height = params.set_height;
 				ppp.target_height = params.target_height;
+				ppp.loft = params.loft;
+				if (sections.length > 0) {
+					ppp.sections = sections.map( ring => ring.map( h => ({ x: h.position.x, y: h.position.y, z: h.position.z }) ) );
+				}
 				ppp.npoints = ppp.points.length;
 				return JSON.stringify( ppp )
 			}
@@ -1695,6 +1890,11 @@ G1 F3360
 				*/
 				raycaster.setFromCamera( pointer, camera );
 
+				if (params.loft) {
+					loftPointerDown( event );
+					return;
+				}
+
 				const intersects = raycaster.intersectObjects( splineHelperObjects, false );
 
 				if ( intersects.length > 0 ) {
@@ -1713,11 +1913,60 @@ G1 F3360
 
 			}
 
-			function onPointerUp() {
+			// Loft mode picking. A handle of the selected section is picked first, in the
+			// capture phase, before the gizmo sees the press: the gizmo on the section's
+			// center covers the handles at the front. The press stops there, so it does
+			// not also start moving the section.
+			function loftPickHandle( event ) {
+				if ( !params.loft || selectedSection === null || event.target !== renderer.domElement ) { return }
+				pointer.x = ( event.clientX / window.innerWidth ) * 2 - 1;
+				pointer.y = - ( event.clientY / window.innerHeight ) * 2 + 1;
+				raycaster.setFromCamera( pointer, camera );
+				const hits = raycaster.intersectObjects( selectedSection, false );
+				if ( hits.length > 0 && hits[0].object !== transformControl.object ) {
+					transformControl.attach( hits[0].object );
+					event.stopPropagation();
+					render();
+				}
+			}
+
+			// otherwise a press on a section outline selects that section; a click on
+			// nothing deselects in onPointerUp()
+			let loftMissed = false
+
+			function loftPointerDown( event ) {
+				loftMissed = false;
+				// a press on the gizmo, or on the GUI panel, is not a pick
+				if ( transformControl.dragging || transformControl.axis !== null || event.target !== renderer.domElement ) { return }
+
+				if (loftRings !== null) {
+					// about 8 pixels at the distance of the pot
+					raycaster.params.Line.threshold = 8.0 * 2.0*camera.position.length()*Math.tan( camera.fov*Math.PI/360.0 ) / window.innerHeight;
+					const hits = raycaster.intersectObjects( loftRings.children, false );
+					if ( hits.length > 0 ) {
+						selectSection( hits[0].object.userData.section );
+						updateSplineOutline();
+						render();
+						return;
+					}
+				}
+
+				loftMissed = true;
+			}
+
+			function onPointerUp( event ) {
 			//	log("pointerup",event)
 
 				onUpPosition.x = event.clientX;
 				onUpPosition.y = event.clientY;
+
+				// a click (not an orbit drag) on empty space deselects the section
+				if ( params.loft && loftMissed && onDownPosition.distanceTo( onUpPosition ) === 0 && selectedSection !== null ) {
+					selectSection( null );
+					updateSplineOutline();
+					render();
+				}
+				loftMissed = false;
 
 				//if ( onDownPosition.distanceTo( onUpPosition ) === 0 ) transformControl.detach();
 			//	console.log(params)
