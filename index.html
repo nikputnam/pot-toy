@@ -352,7 +352,8 @@
 			const pivotLast = new THREE.Vector3()
 			// Scale handles, shown with the selected section: one just outside it on each
 			// axis in its plane, x (red, like the gizmo's x arrow) and z (blue). Dragging
-			// one stretches the section along that axis about its center.
+			// one stretches the section along that axis about its center; with shift held,
+			// along both axes.
 			const scaleHandles = [ new THREE.Vector3( 1, 0, 0 ), new THREE.Vector3( 0, 0, 1 ) ].map( function( axis ) {
 				const h = new THREE.Mesh( new THREE.SphereGeometry( 25, 16, 12 ), new THREE.MeshStandardMaterial( {
 					color: axis.x == 1 ? 0xff0000 : 0x0000ff, roughness: 1.0, metalness: 0.0 } ) )
@@ -540,7 +541,7 @@
 					start: selectedSection.map( x => x.position.clone() ) }
 			}
 
-			function scaleSection() {
+			function scaleSection( uniform ) {
 				raycaster.setFromCamera( pointer, camera );
 				const hit = new THREE.Vector3()
 				if ( raycaster.ray.intersectPlane( scaleDrag.plane, hit ) === null ) { return }
@@ -549,7 +550,11 @@
 				const f = Math.max( 0.05, ( hit.sub( c ).dot( a ) - scaleDrag.offset ) / scaleDrag.ext )
 				selectedSection.forEach( function( h, i ) {
 					const p0 = scaleDrag.start[i]
-					h.position.copy( p0 ).addScaledVector( a, (f-1.0)*p0.clone().sub( c ).dot( a ) )
+					if (uniform) {
+						h.position.set( c.x + f*(p0.x - c.x), p0.y, c.z + f*(p0.z - c.z) )
+					} else {
+						h.position.copy( p0 ).addScaledVector( a, (f-1.0)*p0.clone().sub( c ).dot( a ) )
+					}
 				} )
 				updateSplineOutline();
 				render();
@@ -2143,7 +2148,7 @@ G1 F3360
 				pointer.x = ( event.clientX / window.innerWidth ) * 2 - 1;
 				pointer.y = - ( event.clientY / window.innerHeight ) * 2 + 1;
 
-				if ( scaleDrag !== null ) { scaleSection() }
+				if ( scaleDrag !== null ) { scaleSection( event.shiftKey ) }
 				enforceFirstPointBottom()
 			}
 
