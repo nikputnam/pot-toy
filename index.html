@@ -103,8 +103,10 @@
 				tension: 0.5,
 				centripetal: false,
 				chordal: false,
-				addPoint: addPoint,
-				removePoint: removePoint,
+				addPoint: undoable( addPoint ),
+				removePoint: undoable( removePoint ),
+				undo: undo,
+				redo: redo,
 				exportJson: exportJson,
 				exportToObj: exportToObj,
 				exportGcode: exportGcode,
@@ -135,9 +137,9 @@
 				image_bump_amplitude: 1.0,
 
 				loft: false,
-				addSection: addSection,
-				removeSection: removeSection,
-				resetSections: resetSections
+				addSection: undoable( addSection ),
+				removeSection: undoable( removeSection ),
+				resetSections: undoable( resetSections )
 
 			};
 
@@ -371,6 +373,12 @@
 			const SCALE_HANDLE_GAP = 80.0
 			let scaleDrag = null
 
+			// undo history of the control point positions; see pushUndo()
+			const undoStack = []
+			let redoStack = []
+			let redoSaved = null
+			const UNDO_LIMIT = 100
+
 			function loftColumns() {
 				// lowest section first; it is the bottom
 				const sorted = sections.slice().sort( (a,b) => a[0].position.y - b[0].position.y )
@@ -543,6 +551,7 @@
 				const hit = new THREE.Vector3()
 				if ( raycaster.ray.intersectPlane( plane, hit ) === null ) { return }
 				const ext = sectionExtent( c, a )
+				pushUndo()
 				scaleDrag = { axis: a, center: c, plane: plane, ext: ext,
 					offset: hit.sub( c ).dot( a ) - ext,
 					start: selectedSection.map( x => x.position.clone() ) }
@@ -1373,6 +1382,7 @@ G1 F3360
 					if ( m ) { params[ m[1] ] = parseFloat( m[2] ) }
 				}
 
+				pushUndo();
 				if ( Array.isArray( model.sections ) && model.sections.length >= 2 ) {
 					clearSections();
 					for ( const ring of model.sections ) { addSectionHandles( ring ) }
@@ -1381,6 +1391,7 @@ G1 F3360
 				}
 
 				load( model.points.map( p => new THREE.Vector3( p.x, p.y, 0 ) ) );
+				dropUndoIfUnchanged();
 				showHandles();
 				updateSurfaceImage();
 				gui.controllersRecursive().forEach( c => c.updateDisplay() );
@@ -1562,6 +1573,8 @@ G1 F3360
 				*/
 				gui.add( params, 'addPoint' );
 				gui.add( params, 'removePoint' );
+				gui.add( params, 'undo' ).name( 'Undo (Ctrl/Cmd-Z)' );
+				gui.add( params, 'redo' ).name( 'Redo (Shift-Ctrl/Cmd-Z)' );
 
 				let lft = gui.addFolder( 'Loft (experimental)' );
 				lft.add( params, 'loft' ).name( 'Loft between sections' ).onChange( function() {
@@ -1730,6 +1743,7 @@ G1 F3360
 				transformControl.addEventListener( 'dragging-changed', function ( event ) {
 
 					controls.enabled = ! event.value;
+					if ( event.value ) { pushUndo() } else { dropUndoIfUnchanged() }
 
 				},  { passive: false } );
 				scene.add( transformControl );
@@ -1751,6 +1765,7 @@ G1 F3360
 				document.addEventListener( 'pointerup', onPointerUp );
 				document.addEventListener( 'pointermove', onPointerMove );
 				window.addEventListener( 'resize', onWindowResize );
+				window.addEventListener( 'keydown', onKeyDown );
 
 				var rgbl = new RGBELoader()
 					.setPath( 'textures/' )
@@ -2040,6 +2055,88 @@ G1 F3360
 
 			}
 
+
+			// Undo for the control points: the profile points and the loft sections.
+			// Every edit saves a snapshot of all the positions first, with pushUndo();
+			// an edit that turns out to change nothing drops it again, so no undo step
+			// is a no-op. Snapshots are JSON strings, which makes comparing them easy.
+			// (the stacks are declared near the top of the module, before init() runs)
+
+			function pointsState() {
+				return JSON.stringify( {
+					profile: splineHelperObjects.map( h => h.position.toArray() ),
+					sections: sections.map( ring => ring.map( h => h.position.toArray() ) )
+				} )
+			}
+
+			function pushUndo() {
+				const st = pointsState()
+				// a new edit ends the redo history; keep it in case the edit is dropped
+				redoSaved = redoStack
+				redoStack = []
+				if ( undoStack[ undoStack.length-1 ] === st ) { return }
+				undoStack.push( st )
+				if ( undoStack.length > UNDO_LIMIT ) { undoStack.shift() }
+			}
+
+			function dropUndoIfUnchanged() {
+				if ( undoStack[ undoStack.length-1 ] === pointsState() ) {
+					undoStack.pop()
+					if ( redoSaved !== null ) { redoStack = redoSaved }
+				}
+				redoSaved = null
+			}
+
+			// a GUI action that edits the points, with a snapshot before it
+			function undoable( action ) {
+				return function() {
+					pushUndo()
+					action()
+					dropUndoIfUnchanged()
+				}
+			}
+
+			function applyPointsState( st ) {
+				const model = JSON.parse( st )
+				// keep the same section selected, by its index
+				const sel = sections.indexOf( selectedSection )
+				// a snapshot from before loft mode was first turned on has no sections;
+				// leave the current ones
+				if ( model.sections.length >= 2 ) {
+					clearSections()
+					for ( const ring of model.sections ) {
+						addSectionHandles( ring.map( p => new THREE.Vector3( ...p ) ) )
+					}
+				}
+				load( model.profile.map( p => new THREE.Vector3( ...p ) ) )
+				showHandles()
+				if ( params.loft && sel >= 0 && sel < sections.length ) { selectSection( sections[sel] ) }
+				updateSplineOutline()
+				render()
+			}
+
+			function undo() {
+				if ( undoStack.length == 0 || transformControl.dragging || scaleDrag !== null ) { return }
+				redoStack.push( pointsState() )
+				applyPointsState( undoStack.pop() )
+			}
+
+			function redo() {
+				if ( redoStack.length == 0 || transformControl.dragging || scaleDrag !== null ) { return }
+				undoStack.push( pointsState() )
+				applyPointsState( redoStack.pop() )
+			}
+
+			function onKeyDown( event ) {
+				// leave typing in the GUI's number and text fields alone
+				const tag = event.target.tagName
+				if ( tag == 'INPUT' || tag == 'TEXTAREA' ) { return }
+				if ( ( event.ctrlKey || event.metaKey ) && event.key.toLowerCase() == 'z' ) {
+					event.preventDefault()
+					if ( event.shiftKey ) { redo() } else { undo() }
+				}
+			}
+
 			function render() {
 				splines.uniform.mesh.visible = params.uniform;
 				splines.centripetal.mesh.visible = params.centripetal;
@@ -2138,7 +2235,10 @@ G1 F3360
 				onUpPosition.x = event.clientX;
 				onUpPosition.y = event.clientY;
 
-				scaleDrag = null;
+				if ( scaleDrag !== null ) {
+					scaleDrag = null;
+					dropUndoIfUnchanged();
+				}
 
 				// a click (not an orbit drag) on empty space deselects the section
 				if ( params.loft && loftMissed && onDownPosition.distanceTo( onUpPosition ) === 0 && selectedSection !== null ) {
