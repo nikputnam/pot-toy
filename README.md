@@ -28,10 +28,18 @@ not work. Any recent Chrome, Firefox or Safari is fine.
 - **Control points** are the red spheres. Drag them to change the profile.
   `addPoint` and `removePoint` in the panel add or remove one at the top.
 - **facet / n_facets / twist / puff / squash** change the cross-section.
-- **Texture** adds a radial sine wave to the toolpath: amplitude in
-  millimeters, whole periods per turn, and a fractional period that shifts
-  the phase between successive turns of the spiral. It shows only in the
-  toolpath preview and the G-code, not on the shaded surface.
+- **Texture** has two sections.
+  - **Sine wave** adds a radial sine wave to the toolpath: amplitude in
+    millimeters, whole periods per turn, and a fractional period that shifts
+    the phase between successive turns of the spiral. It shows only in the
+    toolpath preview and the G-code, not on the shaded surface.
+  - **Surface image** wraps an image around the pot (a checkerboard until
+    you load one), with repeats per turn, a left/right mirror and an
+    up/down shift. With **Image bumps the toolpath** on, dark parts of the
+    image push the printed wall out (or in, for a negative amount).
+
+  The LSCM uv map setting below the two sections places both patterns more
+  evenly on squashed and faceted pots.
 - **Show spiral toolpath** draws the path the printer will follow.
 - **Export** writes OBJ, JSON (a record of the control points and settings;
   the same record is written as a comment at the top of the G-code), or

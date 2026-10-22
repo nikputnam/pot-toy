@@ -1595,28 +1595,32 @@ G1 F3360
 						render();
 					}
 				}
-				tex.add( params, 'texture' ).name( 'Radial sine wave' ).onChange( textureChanged );
-				tex.add( params, 'texture_amplitude', 0.0, 5.0 ).name( 'Amplitude (mm)' ).step( 0.1 ).onChange( textureChanged );
-				tex.add( params, 'texture_periods', 0, 60 ).name( 'Periods per turn' ).step( 1 ).onChange( textureChanged );
-				tex.add( params, 'texture_fraction', 0.0, 1.0 ).name( 'Fractional periods' ).step( 0.01 ).onChange( textureChanged );
-				tex.add( params, 'texture_conformal' ).name( 'Square cells (conformal)' ).onChange( textureChanged );
-				tex.add( params, 'uv_lscm' ).name( 'LSCM uv map (squash, facets)' ).onChange( function() {
-					updateSplineOutline();
-					render();
-				} );
+				// two sections: the sine wave and the surface image. The uv map setting
+				// places both, so it stays at the top level of the folder, below them.
+				let sine = tex.addFolder( 'Sine wave' );
+				sine.add( params, 'texture' ).name( 'Radial sine wave' ).onChange( textureChanged );
+				sine.add( params, 'texture_amplitude', 0.0, 5.0 ).name( 'Amplitude (mm)' ).step( 0.1 ).onChange( textureChanged );
+				sine.add( params, 'texture_periods', 0, 60 ).name( 'Periods per turn' ).step( 1 ).onChange( textureChanged );
+				sine.add( params, 'texture_fraction', 0.0, 1.0 ).name( 'Fractional periods' ).step( 0.01 ).onChange( textureChanged );
+				sine.add( params, 'texture_conformal' ).name( 'Square cells (conformal)' ).onChange( textureChanged );
 				function imageChanged() {
 					updateSurfaceImage();
 					// the repeats also place the image for the toolpath bump
 					if (params.image_bump && params.spiralize) { updateSplineOutline(); }
 					render();
 				}
-				surface_image_controller = tex.add( params, 'surface_image' ).name( 'Show image on surface' ).onChange( imageChanged );
-				tex.add( params, 'image_repeat', 1, 40 ).name( 'Image repeats per turn' ).step( 1 ).onChange( imageChanged );
-				tex.add( params, 'image_mirror' ).name( 'Mirror image left/right' ).onChange( imageChanged );
-				tex.add( params, 'image_shift', 0.0, 1.0 ).name( 'Shift image up/down' ).step( 0.01 ).onChange( imageChanged );
-				tex.add( params, 'loadImage' ).name( 'Load image...' );
-				tex.add( params, 'image_bump' ).name( 'Image bumps the toolpath' ).onChange( textureChanged );
-				tex.add( params, 'image_bump_amplitude', -5.0, 5.0 ).name( 'Bump, black (mm)' ).step( 0.1 ).onChange( textureChanged );
+				let img = tex.addFolder( 'Surface image' );
+				img.add( params, 'loadImage' ).name( 'Load image...' );
+				surface_image_controller = img.add( params, 'surface_image' ).name( 'Show image on surface' ).onChange( imageChanged );
+				img.add( params, 'image_repeat', 1, 40 ).name( 'Image repeats per turn' ).step( 1 ).onChange( imageChanged );
+				img.add( params, 'image_mirror' ).name( 'Mirror image left/right' ).onChange( imageChanged );
+				img.add( params, 'image_shift', 0.0, 1.0 ).name( 'Shift image up/down' ).step( 0.01 ).onChange( imageChanged );
+				img.add( params, 'image_bump' ).name( 'Image bumps the toolpath' ).onChange( textureChanged );
+				img.add( params, 'image_bump_amplitude', -5.0, 5.0 ).name( 'Bump, black (mm)' ).step( 0.1 ).onChange( textureChanged );
+				tex.add( params, 'uv_lscm' ).name( 'LSCM uv map (squash, facets)' ).onChange( function() {
+					updateSplineOutline();
+					render();
+				} );
 				tex.close();
 
 				let h = gui.addFolder( 'Export' );
