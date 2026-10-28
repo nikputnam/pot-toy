@@ -120,6 +120,10 @@
 				bed_height: 0.0,
 				line_width: 2.0,
 				user: "anon",
+				copies: 1,
+				copy_gap: 20.0,
+				bed_width: 430.0,
+				bed_depth: 460.0,
 
 				texture: false,
 				texture_amplitude: 1.0,
@@ -1212,6 +1216,29 @@
 
 			}
 
+			// Bed positions (printer X, Y in mm) for the centers of params.copies copies of
+			// a pot with footprint fx by fy. A single copy keeps the usual spot (tx, ty).
+			// Several copies start at the front left corner, one copy_gap in from the
+			// edges, and fill a row along X; when the next copy would run past
+			// bed_width the row ends and a new one begins one pitch further along Y.
+			// Copies that would run past bed_depth are dropped.
+			function copyLayout( fx, fy, tx, ty ) {
+				if (params.copies <= 1) { return [ [ tx, ty ] ] }
+				const centers = []
+				var x = params.copy_gap + fx/2
+				var y = params.copy_gap + fy/2
+				while ( centers.length < params.copies ) {
+					if ( x + fx/2 > params.bed_width + 1e-6 && centers.length > 0 ) {
+						x = params.copy_gap + fx/2
+						y += fy + params.copy_gap
+					}
+					if ( y + fy/2 > params.bed_depth + 1e-6 && centers.length > 0 ) { break }
+					centers.push( [ x, y ] )
+					x += fx + params.copy_gap
+				}
+				return centers
+			}
+
 			function exportGcode() {
 				const sf = scale_factor()
 				const box = bbox()
@@ -1232,7 +1259,8 @@
 					// three raster layers of bottom under the wall
 					tz = params.bed_height + 3.0*params.layer_height
 				}
-				const sppoints = spiralPath( scale_factor() ).map(function(p) { 
+				// one copy of the path in printer mm, centered on X0 Y0 and resting on the bed
+				const path = spiralPath( scale_factor() ).map(function(p) { 
 					p.y -= miny //+ (params.bottom ? params.layer_height/scale_factor() :  0.0 )
 					return p
 				}).map(function(p) { 
@@ -1242,9 +1270,20 @@
 					var w = p.y ; p.y = -p.z ; p.z = w; 
 					return p
 				}).map(function(p) { 
-					p.x += tx;  p.y += ty  ; p.z += tz
+					p.z += tz
 					return p
 				})
+
+				// footprint of a copy on the bed, from the path itself so texture counts
+				const fx = Math.max( ...path.map( p => p.x ) ) - Math.min( ...path.map( p => p.x ) )
+				const fy = Math.max( ...path.map( p => p.y ) ) - Math.min( ...path.map( p => p.y ) )
+				const top_z = Math.max( ...path.map( p => p.z ) )
+				const centers = copyLayout( fx, fy, tx, ty )
+				if (centers.length < params.copies) {
+					window.alert( "Only " + centers.length + " of " + params.copies + " copies fit on the "
+						+ params.bed_width + " x " + params.bed_depth + " mm bed. Exporting " + centers.length + "." )
+				}
+				const sppoints = path.map( p => p.clone().add( new THREE.Vector3( centers[0][0], centers[0][1], 0 ) ) )
 
 
 				//" "+p.x+" "+p.y+" "+p.z+"\n" //
@@ -1260,20 +1299,42 @@
 				var dd = 0
 				var lp = sppoints[0]
 				var layer = layerIndex( lp.z )
-				var gcode = sppoints.map(
-					function(p){ 
-					var r = ""
-					const l = layerIndex( p.z )
-					if (l > layer) {
-						r += layerChange( p.z )
-						layer = l
+				// one copy of the wall: the first point of each copy is reached by a travel
+				// move, so it does not extrude
+				const copyGcode = function( points ) {
+					layer = layerIndex( points[0].z )
+					lp = points[0]
+					return points.map(
+						function(p){ 
+						var r = ""
+						const l = layerIndex( p.z )
+						if (l > layer) {
+							r += layerChange( p.z )
+							layer = l
+						}
+						dd += 0.4 * p.distanceTo(lp)
+						r += "G1 X"+p.x+" Y"+p.y+" Z"+p.z+" E"+dd+"\n" 
+						lp = p 
+						return r 
 					}
-					dd += 0.4 * p.distanceTo(lp)
-					r += "G1 X"+p.x+" Y"+p.y+" Z"+p.z+" E"+dd+"\n" 
-					lp = p 
-					return r 
+					).reduce( (a,b)=>a+b , "")
 				}
-				).reduce( (a,b)=>a+b , "")
+				// retract, lift clear of the finished pots, travel to the next copy's first
+				// point, come down, prime, and restore the print feed rate
+				const travelGcode = function( p ) {
+					return "G1 E"+(dd-0.5)+" F900\n"
+						+ "G1 Z"+(top_z + 10.0).toFixed(3)+" F9000\n"
+						+ "G1 X"+p.x+" Y"+p.y+" F9000\n"
+						+ layerChange( p.z )
+						+ "G1 Z"+p.z+" F3000\n"
+						+ "G1 E"+dd+" F900\n"
+						+ "G1 F3360\n"
+				}
+				var gcode = copyGcode( sppoints )
+				for ( let c = 1; c < centers.length; c ++ ) {
+					const points = path.map( p => p.clone().add( new THREE.Vector3( centers[c][0], centers[c][1], 0 ) ) )
+					gcode += travelGcode( points[0] ) + copyGcode( points )
+				}
 
 			//	console.log(points)
 //				const exporter = new OBJExporter();
@@ -1289,6 +1350,10 @@ G1 X200  F2400 ; home X axis
 				info += "; bed_height: " + params.bed_height + "\n"
 				info += "; layer_height: " + params.layer_height + "\n"
 				info += "; line_width: " + params.line_width + "\n"
+				info += "; copies: " + centers.length + "\n"
+				info += "; copy_gap: " + params.copy_gap + "\n"
+				info += "; bed_width: " + params.bed_width + "\n"
+				info += "; bed_depth: " + params.bed_depth + "\n"
 				info += "; scale_factor: " + scale_factor() + "\n"
 				info += "; set_height: " + params.set_height + (params.set_height ? " (" + params.target_height + " mm)" : "") + "\n"
 
@@ -1371,14 +1436,14 @@ G1 F3360
 				const fields = [ 'bottom', 'facet', 'n_facets', 'twist', 'squash', 'puff',
 					'texture', 'texture_amplitude', 'texture_periods', 'texture_fraction',
 					'texture_conformal', 'uv_lscm', 'surface_image', 'image_repeat', 'image_mirror', 'image_shift',
-					'image_bump', 'image_bump_amplitude', 'set_height', 'target_height', 'loft' ];
+					'image_bump', 'image_bump_amplitude', 'set_height', 'target_height', 'copies', 'loft' ];
 				for ( const f of fields ) {
 					if ( model[ f ] !== undefined ) { params[ f ] = model[ f ] }
 				}
 
 				// the printer settings are separate comment lines in the G-code header
 				for ( const line of lines ) {
-					const m = line.match( /^\s*;\s*(bed_height|layer_height|line_width)\s*:\s*(-?[0-9.]+)\s*$/ );
+					const m = line.match( /^\s*;\s*(bed_height|layer_height|line_width|copy_gap|bed_width|bed_depth)\s*:\s*(-?[0-9.]+)\s*$/ );
 					if ( m ) { params[ m[1] ] = parseFloat( m[2] ) }
 				}
 
@@ -1626,6 +1691,7 @@ G1 F3360
 				let h = gui.addFolder( 'Export' );
 				h.add(params, 'user').name("Name (for labeling files):")
 				h.add( params, 'exportToObj' ).name( 'Export OBJ' );
+				h.add( params, 'copies', 1, 30 ).name( 'Copies to print' ).step( 1 );
 				h.add( params, 'exportGcode' ).name( 'Export Gcode' );
 				h.add( params, 'exportJson' ).name( 'Export JSON' );
 				h.add( params, 'restoreGcode' ).name( 'Restore from Gcode' );
@@ -1658,6 +1724,9 @@ G1 F3360
 					}
 				}
 				prs.add( params, 'set_height' ).name( 'Set height manually' ).onChange( scaleChanged );
+				prs.add( params, 'copy_gap', 0.0, 100.0 ).name( 'Gap between copies (mm)' ).step( 1.0 );
+				prs.add( params, 'bed_width', 100.0, 600.0 ).name( 'Bed width X (mm)' ).step( 10.0 );
+				prs.add( params, 'bed_depth', 100.0, 600.0 ).name( 'Bed depth Y (mm)' ).step( 10.0 );
 				prs.add( params, 'target_height', 10.0, 250.0 ).name( 'Height (mm)' ).step( 1.0 ).onChange( scaleChanged );
 				prs.close();
 				gui.close();
@@ -2026,6 +2095,7 @@ G1 F3360
 				ppp.image_bump_amplitude = params.image_bump_amplitude;
 				ppp.set_height = params.set_height;
 				ppp.target_height = params.target_height;
+				ppp.copies = params.copies;
 				ppp.loft = params.loft;
 				if (sections.length > 0) {
 					ppp.sections = sections.map( ring => ring.map( h => ({ x: h.position.x, y: h.position.y, z: h.position.z }) ) );
