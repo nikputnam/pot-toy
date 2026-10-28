@@ -780,7 +780,10 @@
 					return { path: w, length: wl }
 				}
 
-				return { at: at, link: link }
+				// length of the boundary walk from sA to sB, the shorter way round
+				const dist = function( sA, sB ) { const f = ( pos(sB) - pos(sA) + L ) % L; return Math.min( f, L - f ) }
+
+				return { at: at, link: link, walk: walk, dist: dist }
 			}
 
 			// One raster layer filling the polygon P ([x, z] pairs) with rows parallel to x,
@@ -791,13 +794,19 @@
 			// continuous extrusion never draws outside it. from: [x, z] to start near, or
 			// null. close: end at the boundary point s = 0, where the wall starts.
 			// Returns the path as [x, z] pairs.
+			// Rows of a bottom layer inside outline P, one line width lw apart, as [x, z]
+			// points. from is where the previous layer ended, as a position along the
+			// outline, or null for the first layer: the layer starts with a walk along the
+			// outline from there to the nearest row end, so the move between layers never
+			// cuts across the layer just printed. Returns the path and where it ends on
+			// the outline.
 			function rasterLayer( P, lw, from, close ) {
 				const N = P.length
 				const tools = polygonPaths( P )
 				let zmin = Infinity, zmax = -Infinity
 				for (const p of P) { zmin = Math.min( zmin, p[1] ); zmax = Math.max( zmax, p[1] ) }
 				const nrows = Math.round( (zmax-zmin)/lw )
-				if ( nrows < 1 ) { return [] }
+				if ( nrows < 1 ) { return { path: [], end: from } }
 				const dz = (zmax-zmin)/nrows
 
 				const rows = []
@@ -842,23 +851,28 @@
 
 				const out = []
 				const done = chains.map( () => false )
-				let here = from
+				let here = from === null ? null : tools.at( from )
 				let last = null
 				for (let c = 0; c < chains.length; c++) {
-					// the nearest chain end; a chain can be run backwards
+					// the nearest chain end; a chain can be run backwards. The first chain is
+					// the nearest along the outline from where the previous layer ended
 					let best = 0, rev = false, bd = Infinity
 					chains.forEach( function( q, i ) {
 						if ( done[i] ) { return }
 						for (const r of [false, true]) {
-							const p = tools.at( ( r ? q[q.length-1] : q[0] ).s )
-							const d = here ? Math.hypot( p[0]-here[0], p[1]-here[1] ) : 0.0
+							const e = ( r ? q[q.length-1] : q[0] ).s
+							const p = tools.at( e )
+							var d = 0.0
+							if ( last === null && from !== null ) { d = tools.dist( from, e ) }
+							else if ( here ) { d = Math.hypot( p[0]-here[0], p[1]-here[1] ) }
 							if ( d < bd ) { bd = d; best = i; rev = r }
 						}
 					} )
 					done[best] = true
 					const q = rev ? chains[best].slice().reverse() : chains[best]
-					if ( last === null ) { out.push( tools.at( q[0].s ) ) }
-					else { out.push( ...tools.link( last.s, q[0].s ).path ) }
+					if ( last !== null ) { out.push( ...tools.link( last.s, q[0].s ).path ) }
+					else if ( from !== null ) { out.push( ...tools.walk( from, q[0].s ) ) }
+					else { out.push( tools.at( q[0].s ) ) }
 					// q[0] to q[1] is a row, q[1] to q[2] a move to the next row, ...
 					for (let j = 1; j < q.length; j++) {
 						if ( j % 2 == 1 ) { out.push( tools.at( q[j].s ) ) }
@@ -867,8 +881,8 @@
 					last = q[q.length-1]
 					here = tools.at( last.s )
 				}
-				if ( close ) { out.push( ...tools.link( last.s, 0.0 ).path ) }
-				return out
+				if ( close ) { out.push( ...tools.link( last.s, 0.0 ).path ); return { path: out, end: 0.0 } }
+				return { path: out, end: last.s }
 			}
 
 			// The three bottom layers, at heights 0, 1 and 2 layer heights: raster fills of
@@ -882,15 +896,18 @@
 				const outline = bottomOutline( fn, 0.5*lw )
 
 				const pts = []
+				// where the previous layer ended, as a position along the outline. Rotating
+				// the outline keeps its point order, so the position means the same place
+				// in every layer
+				let from = null
 				for (let layer = 0; layer < 3; layer++) {
 					// rotate the outline so the rows of this layer run along x
 					const a = ( layer % 2 ) * 0.5*Math.PI
 					const ca = Math.cos(a), sa = Math.sin(a)
 					const P = outline.map( p => [ p[0]*ca + p[1]*sa, -p[0]*sa + p[1]*ca ] )
-					const h = pts.length > 0 ? pts[pts.length-1] : null
-					const from = h ? [ h.x*ca + h.z*sa, -h.x*sa + h.z*ca ] : null
-					const path = rasterLayer( P, lw, from, layer == 2 )
-					for (const p of path) { pts.push( new THREE.Vector3( p[0]*ca - p[1]*sa, layer*lh, p[0]*sa + p[1]*ca ) ) }
+					const r = rasterLayer( P, lw, from, layer == 2 )
+					for (const p of r.path) { pts.push( new THREE.Vector3( p[0]*ca - p[1]*sa, layer*lh, p[0]*sa + p[1]*ca ) ) }
+					from = r.end
 				}
 
 				// lead in from three line widths outside the first point
@@ -1300,12 +1317,16 @@
 				var lp = sppoints[0]
 				var layer = layerIndex( lp.z )
 				// one copy of the wall: the first point of each copy is reached by a travel
-				// move, so it does not extrude
+				// move, so it does not extrude. Points within 0.02 mm of the previous one
+				// are dropped: the printer and slicers hold E as a 32-bit float, so on a
+				// micron-long segment the rounded E step can be many times the nominal
+				// extrusion, which shows as a fat blob
 				const copyGcode = function( points ) {
 					layer = layerIndex( points[0].z )
 					lp = points[0]
 					return points.map(
-						function(p){ 
+						function(p, i){ 
+						if ( i > 0 && p.distanceTo(lp) < 0.02 ) { return "" }
 						var r = ""
 						const l = layerIndex( p.z )
 						if (l > layer) {
@@ -1320,15 +1341,19 @@
 					).reduce( (a,b)=>a+b , "")
 				}
 				// retract, lift clear of the finished pots, travel to the next copy's first
-				// point, come down, prime, and restore the print feed rate
+				// point, come down, prime, zero E so it stays small, and restore the print
+				// feed rate
 				const travelGcode = function( p ) {
-					return "G1 E"+(dd-0.5)+" F900\n"
+					const r = "G1 E"+(dd-0.5)+" F900\n"
 						+ "G1 Z"+(top_z + 10.0).toFixed(3)+" F9000\n"
 						+ "G1 X"+p.x+" Y"+p.y+" F9000\n"
 						+ layerChange( p.z )
 						+ "G1 Z"+p.z+" F3000\n"
 						+ "G1 E"+dd+" F900\n"
+						+ "G92 E0\n"
 						+ "G1 F3360\n"
+					dd = 0
+					return r
 				}
 				var gcode = copyGcode( sppoints )
 				for ( let c = 1; c < centers.length; c ++ ) {
