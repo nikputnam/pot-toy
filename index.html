@@ -838,7 +838,12 @@
 					}
 					hits.sort( (h1,h2) => h1.x - h2.x )
 					const segs = []
-					for (let j = 0; j+1 < hits.length; j += 2) { segs.push( { lo: hits[j], hi: hits[j+1], used: false } ) }
+					// a stub shorter than half a line width, where a wavy outline forks, is
+					// a blob rather than fill, and is left out
+					for (let j = 0; j+1 < hits.length; j += 2) {
+						if ( hits[j+1].x - hits[j].x < 0.5*lw ) { continue }
+						segs.push( { lo: hits[j], hi: hits[j+1], used: false } )
+					}
 					rows.push( segs )
 				}
 
@@ -865,28 +870,65 @@
 					}
 				}
 
-				const out = []
-				const done = chains.map( () => false )
-				let here = from === null ? null : tools.at( from )
-				let last = null
-				for (let c = 0; c < chains.length; c++) {
-					// the nearest chain end; a chain can be run backwards. The first chain is
-					// the nearest along the outline from where the previous layer ended
-					let best = 0, rev = false, bd = Infinity
-					chains.forEach( function( q, i ) {
-						if ( done[i] ) { return }
-						for (const r of [false, true]) {
-							const e = ( r ? q[q.length-1] : q[0] ).s
-							const p = tools.at( e )
-							var d = 0.0
-							if ( last === null && from !== null ) { d = tools.dist( from, e ) }
-							else if ( here ) { d = Math.hypot( p[0]-here[0], p[1]-here[1] ) }
-							if ( d < bd ) { bd = d; best = i; rev = r }
+				// The order to print the chains in, each forwards or backwards, with the
+				// least walking along the outline: from where the previous layer ended,
+				// between chains, and on the last layer round to the wall's start. Every
+				// order is tried when there are few chains; beyond that, nearest end first.
+				// Moves between chains always follow the outline, so they never cross the
+				// rows already printed.
+				const startS = q => q[0].s, endS = q => q[q.length-1].s
+				const cost = function( order ) {
+					var t = 0.0, at = from
+					for (const [i, rev] of order) {
+						const q = chains[i]
+						const a = rev ? endS(q) : startS(q), b = rev ? startS(q) : endS(q)
+						if ( at !== null ) { t += tools.dist( at, a ) }
+						at = b
+					}
+					if ( close && at !== null ) { t += tools.dist( at, 0.0 ) }
+					return t
+				}
+				var order = []
+				if ( chains.length <= 6 ) {
+					var bestCost = Infinity
+					const search = function( sofar, left ) {
+						if ( left.length == 0 ) {
+							const c = cost( sofar )
+							if ( c < bestCost ) { bestCost = c; order = sofar.slice() }
+							return
 						}
-					} )
-					done[best] = true
-					const q = rev ? chains[best].slice().reverse() : chains[best]
-					if ( last !== null ) { out.push( ...tools.link( last.s, q[0].s ).path ) }
+						for (const i of left) {
+							for (const rev of [false, true]) {
+								sofar.push( [i, rev] )
+								search( sofar, left.filter( j => j != i ) )
+								sofar.pop()
+							}
+						}
+					}
+					search( [], chains.map( (q, i) => i ) )
+				} else {
+					const left = chains.map( (q, i) => i )
+					var at = from
+					while ( left.length > 0 ) {
+						var pick = null, bd = Infinity
+						for (const i of left) {
+							for (const rev of [false, true]) {
+								const a = rev ? endS( chains[i] ) : startS( chains[i] )
+								const d = at === null ? 0.0 : tools.dist( at, a )
+								if ( d < bd ) { bd = d; pick = [i, rev] }
+							}
+						}
+						order.push( pick )
+						at = pick[1] ? startS( chains[pick[0]] ) : endS( chains[pick[0]] )
+						left.splice( left.indexOf( pick[0] ), 1 )
+					}
+				}
+
+				const out = []
+				let last = null
+				for (const [i, rev] of order) {
+					const q = rev ? chains[i].slice().reverse() : chains[i]
+					if ( last !== null ) { out.push( ...tools.walk( last.s, q[0].s ) ) }
 					else if ( from !== null ) { out.push( ...tools.walk( from, q[0].s ) ) }
 					else { out.push( tools.at( q[0].s ) ) }
 					// q[0] to q[1] is a row, q[1] to q[2] a move to the next row, ...
@@ -895,9 +937,9 @@
 						else { out.push( ...tools.link( q[j-1].s, q[j].s ).path ) }
 					}
 					last = q[q.length-1]
-					here = tools.at( last.s )
 				}
-				if ( close ) { out.push( ...tools.link( last.s, 0.0 ).path ); return { path: out, end: 0.0 } }
+				if ( last === null ) { return { path: out, end: from } }
+				if ( close ) { out.push( ...tools.walk( last.s, 0.0 ) ); return { path: out, end: 0.0 } }
 				return { path: out, end: last.s }
 			}
 
