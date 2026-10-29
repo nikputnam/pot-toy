@@ -124,6 +124,9 @@
 				copy_gap: 20.0,
 				bed_width: 430.0,
 				bed_depth: 460.0,
+				print_accel: 150.0,
+				print_jerk: 10.0,
+				print_time: "(turn on the toolpath)",
 
 				texture: false,
 				texture_amplitude: 1.0,
@@ -1256,7 +1259,17 @@
 				return centers
 			}
 
-			function exportGcode() {
+			// feed rates in the exported G-code, mm/min
+			const print_feed = 3360
+			const travel_feed = 9000
+			const descend_feed = 3000
+			const retract_feed = 900
+
+			// Everything exportGcode() prints, in printer mm: one copy of the toolpath
+			// centered on X0 Y0 and resting on the bed, the bed position of each copy,
+			// and the height the nozzle lifts to between copies. Used by the export and
+			// by the print time estimate, so the two agree.
+			function printMoves() {
 				const sf = scale_factor()
 				const box = bbox()
 				const miny = box[1][0]
@@ -1296,11 +1309,112 @@
 				const fy = Math.max( ...path.map( p => p.y ) ) - Math.min( ...path.map( p => p.y ) )
 				const top_z = Math.max( ...path.map( p => p.z ) )
 				const centers = copyLayout( fx, fy, tx, ty )
+				return { path: path, centers: centers, lift_z: top_z + 10.0 }
+			}
+
+			// the points of one copy placed on the bed, without points that are within
+			// 0.02 mm of the one before: the printer and slicers hold E as a 32-bit
+			// float, so on a micron-long segment the rounded E step can be many times
+			// the nominal extrusion, which shows as a fat blob
+			function copyPoints( path, center ) {
+				const out = []
+				for (const p of path) {
+					const q = new THREE.Vector3( p.x + center[0], p.y + center[1], p.z )
+					if ( out.length > 0 && q.distanceTo( out[out.length-1] ) < 0.02 ) { continue }
+					out.push( q )
+				}
+				return out
+			}
+
+			// Seconds a motion planner takes to run the moves. Each move is { d, v, dir }:
+			// length in mm, feed in mm/s, unit direction, or dir null for a retract.
+			// The speed carried through a corner is limited so that the velocity change
+			// there is at most jerk (mm/s), as in classic jerk planners; a straight-on
+			// joint carries full speed. Then a forward and a backward pass over the
+			// entry speeds (the lookahead) and a trapezoidal profile per move.
+			function planTime( moves, accel, jerk ) {
+				const n = moves.length
+				const ent = new Float64Array( n+1 )
+				for (let i = 1; i < n; i++) {
+					const p = moves[i-1], q = moves[i]
+					var lim = 0.0
+					if ( p.dir !== null && q.dir !== null ) {
+						const dd = Math.hypot( q.dir[0]-p.dir[0], q.dir[1]-p.dir[1], q.dir[2]-p.dir[2] )
+						lim = dd > 1e-9 ? jerk/dd : Infinity
+					}
+					ent[i] = Math.min( p.v, q.v, lim )
+				}
+				for (let i = 0; i < n; i++) { ent[i+1] = Math.min( ent[i+1], Math.sqrt( ent[i]*ent[i] + 2*accel*moves[i].d ) ) }
+				for (let i = n-1; i >= 0; i--) { ent[i] = Math.min( ent[i], Math.sqrt( ent[i+1]*ent[i+1] + 2*accel*moves[i].d ) ) }
+				var t = 0.0
+				for (let i = 0; i < n; i++) {
+					const v0 = ent[i], v1 = ent[i+1], d = moves[i].d, vc = moves[i].v
+					const d_acc = Math.max( 0.0, (vc*vc - v0*v0)/(2*accel) )
+					const d_dec = Math.max( 0.0, (vc*vc - v1*v1)/(2*accel) )
+					if ( d_acc + d_dec <= d ) {
+						t += (vc-v0)/accel + (vc-v1)/accel + (d - d_acc - d_dec)/vc
+					} else {
+						const vpk = Math.sqrt( (2*accel*d + v0*v0 + v1*v1)/2 )
+						t += (vpk-v0)/accel + (vpk-v1)/accel
+					}
+				}
+				return t
+			}
+
+			// estimated seconds to print what exportGcode() would write
+			function printTime( moves ) {
+				const list = []
+				const add = function( a, b, feed ) {
+					const d = a.distanceTo( b )
+					if ( d <= 0.0 ) { return }
+					list.push( { d: d, v: feed/60.0, dir: [ (b.x-a.x)/d, (b.y-a.y)/d, (b.z-a.z)/d ] } )
+				}
+				const retract = function() { list.push( { d: 0.5, v: retract_feed/60.0, dir: null } ) }
+				var last = null
+				for (let c = 0; c < moves.centers.length; c++) {
+					const pts = copyPoints( moves.path, moves.centers[c] )
+					if ( last !== null ) {
+						// the travel block of exportGcode()
+						retract()
+						const up = new THREE.Vector3( last.x, last.y, moves.lift_z )
+						const over = new THREE.Vector3( pts[0].x, pts[0].y, moves.lift_z )
+						add( last, up, travel_feed )
+						add( up, over, travel_feed )
+						add( over, pts[0], descend_feed )
+						retract()
+					}
+					for (let i = 1; i < pts.length; i++) { add( pts[i-1], pts[i], print_feed ) }
+					last = pts[pts.length-1]
+				}
+				retract()
+				return planTime( list, params.print_accel, params.print_jerk )
+			}
+
+			function formatTime( seconds ) {
+				const m = Math.round( seconds/60.0 )
+				if ( m < 60 ) { return m + " min" }
+				return Math.floor( m/60 ) + " h " + ( m % 60 ) + " min"
+			}
+
+			// recompute the estimate shown in the Export folder
+			function updatePrintTime() {
+				const moves = printMoves()
+				params.print_time = formatTime( printTime( moves ) ) + " for " + moves.centers.length + ( moves.centers.length == 1 ? " copy" : " copies" )
+				if ( printTimeController ) { printTimeController.updateDisplay() }
+			}
+			var printTimeController = null
+
+			function exportGcode() {
+				const moves = printMoves()
+				const path = moves.path, centers = moves.centers
 				if (centers.length < params.copies) {
 					window.alert( "Only " + centers.length + " of " + params.copies + " copies fit on the "
 						+ params.bed_width + " x " + params.bed_depth + " mm bed. Exporting " + centers.length + "." )
 				}
-				const sppoints = path.map( p => p.clone().add( new THREE.Vector3( centers[0][0], centers[0][1], 0 ) ) )
+				const sppoints = copyPoints( path, centers[0] )
+				const seconds = printTime( moves )
+				params.print_time = formatTime( seconds ) + " for " + centers.length + ( centers.length == 1 ? " copy" : " copies" )
+				if ( printTimeController ) { printTimeController.updateDisplay() }
 
 
 				//" "+p.x+" "+p.y+" "+p.z+"\n" //
@@ -1317,16 +1431,12 @@
 				var lp = sppoints[0]
 				var layer = layerIndex( lp.z )
 				// one copy of the wall: the first point of each copy is reached by a travel
-				// move, so it does not extrude. Points within 0.02 mm of the previous one
-				// are dropped: the printer and slicers hold E as a 32-bit float, so on a
-				// micron-long segment the rounded E step can be many times the nominal
-				// extrusion, which shows as a fat blob
+				// move, so it does not extrude
 				const copyGcode = function( points ) {
 					layer = layerIndex( points[0].z )
 					lp = points[0]
 					return points.map(
-						function(p, i){ 
-						if ( i > 0 && p.distanceTo(lp) < 0.02 ) { return "" }
+						function(p){ 
 						var r = ""
 						const l = layerIndex( p.z )
 						if (l > layer) {
@@ -1344,20 +1454,20 @@
 				// point, come down, prime, zero E so it stays small, and restore the print
 				// feed rate
 				const travelGcode = function( p ) {
-					const r = "G1 E"+(dd-0.5)+" F900\n"
-						+ "G1 Z"+(top_z + 10.0).toFixed(3)+" F9000\n"
-						+ "G1 X"+p.x+" Y"+p.y+" F9000\n"
+					const r = "G1 E"+(dd-0.5)+" F"+retract_feed+"\n"
+						+ "G1 Z"+moves.lift_z.toFixed(3)+" F"+travel_feed+"\n"
+						+ "G1 X"+p.x+" Y"+p.y+" F"+travel_feed+"\n"
 						+ layerChange( p.z )
-						+ "G1 Z"+p.z+" F3000\n"
-						+ "G1 E"+dd+" F900\n"
+						+ "G1 Z"+p.z+" F"+descend_feed+"\n"
+						+ "G1 E"+dd+" F"+retract_feed+"\n"
 						+ "G92 E0\n"
-						+ "G1 F3360\n"
+						+ "G1 F"+print_feed+"\n"
 					dd = 0
 					return r
 				}
 				var gcode = copyGcode( sppoints )
 				for ( let c = 1; c < centers.length; c ++ ) {
-					const points = path.map( p => p.clone().add( new THREE.Vector3( centers[c][0], centers[c][1], 0 ) ) )
+					const points = copyPoints( path, centers[c] )
 					gcode += travelGcode( points[0] ) + copyGcode( points )
 				}
 
@@ -1379,6 +1489,9 @@ G1 X200  F2400 ; home X axis
 				info += "; copy_gap: " + params.copy_gap + "\n"
 				info += "; bed_width: " + params.bed_width + "\n"
 				info += "; bed_depth: " + params.bed_depth + "\n"
+				info += "; print_accel: " + params.print_accel + "\n"
+				info += "; print_jerk: " + params.print_jerk + "\n"
+				info += "; estimated_print_time: " + formatTime( seconds ) + " (" + Math.round( seconds ) + " s)\n"
 				info += "; scale_factor: " + scale_factor() + "\n"
 				info += "; set_height: " + params.set_height + (params.set_height ? " (" + params.target_height + " mm)" : "") + "\n"
 
@@ -1396,7 +1509,7 @@ ${layerChange( sppoints[0].z )}G1 Z70 F9000
 G1 E-.3 F900
 G92 E0
 G1 E.4 F900
-M204 S150
+M204 S${params.print_accel}
 ;TYPE:External perimeter
 ;WIDTH:3
 G1 F3360
@@ -1468,7 +1581,7 @@ G1 F3360
 
 				// the printer settings are separate comment lines in the G-code header
 				for ( const line of lines ) {
-					const m = line.match( /^\s*;\s*(bed_height|layer_height|line_width|copy_gap|bed_width|bed_depth)\s*:\s*(-?[0-9.]+)\s*$/ );
+					const m = line.match( /^\s*;\s*(bed_height|layer_height|line_width|copy_gap|bed_width|bed_depth|print_accel|print_jerk)\s*:\s*(-?[0-9.]+)\s*$/ );
 					if ( m ) { params[ m[1] ] = parseFloat( m[2] ) }
 				}
 
@@ -1713,10 +1826,16 @@ G1 F3360
 				} );
 				tex.close();
 
+				// the estimate is only kept current while the toolpath is shown, since it
+				// needs the toolpath
+				function timeChanged() {
+					if (params.spiralize) { updatePrintTime() }
+				}
 				let h = gui.addFolder( 'Export' );
 				h.add(params, 'user').name("Name (for labeling files):")
 				h.add( params, 'exportToObj' ).name( 'Export OBJ' );
-				h.add( params, 'copies', 1, 30 ).name( 'Copies to print' ).step( 1 );
+				h.add( params, 'copies', 1, 30 ).name( 'Copies to print' ).step( 1 ).onFinishChange( timeChanged );
+				printTimeController = h.add( params, 'print_time' ).name( 'Estimated print time' ).disable();
 				h.add( params, 'exportGcode' ).name( 'Export Gcode' );
 				h.add( params, 'exportJson' ).name( 'Export JSON' );
 				h.add( params, 'restoreGcode' ).name( 'Restore from Gcode' );
@@ -1752,6 +1871,8 @@ G1 F3360
 				prs.add( params, 'copy_gap', 0.0, 100.0 ).name( 'Gap between copies (mm)' ).step( 1.0 );
 				prs.add( params, 'bed_width', 100.0, 600.0 ).name( 'Bed width X (mm)' ).step( 10.0 );
 				prs.add( params, 'bed_depth', 100.0, 600.0 ).name( 'Bed depth Y (mm)' ).step( 10.0 );
+				prs.add( params, 'print_accel', 50.0, 3000.0 ).name( 'Acceleration (mm/s²)' ).step( 10.0 ).onFinishChange( timeChanged );
+				prs.add( params, 'print_jerk', 1.0, 40.0 ).name( 'Jerk (mm/s)' ).step( 1.0 ).onFinishChange( timeChanged );
 				prs.add( params, 'target_height', 10.0, 250.0 ).name( 'Height (mm)' ).step( 1.0 ).onChange( scaleChanged );
 				prs.close();
 				gui.close();
@@ -2077,6 +2198,7 @@ G1 F3360
 					//var line2 = new THREE.Line(points3D, new THREE.LineBasicMaterial({color: "red"}));
 					surface.mesh.add(line);
 
+					updatePrintTime()
 
 				}
 
