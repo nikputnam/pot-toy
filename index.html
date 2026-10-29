@@ -129,6 +129,7 @@
 				print_jerk: 10.0,
 				path_tolerance: 0.01,
 				first_layer_speed: 50.0,
+				pause_safe_z: false,
 				print_time: "(turn on the toolpath)",
 
 				texture: false,
@@ -1561,6 +1562,7 @@ G1 X200  F2400 ; home X axis
 				info += "; print_jerk: " + params.print_jerk + "\n"
 				info += "; path_tolerance: " + params.path_tolerance + "\n"
 				info += "; first_layer_speed: " + params.first_layer_speed + "\n"
+				info += "; pause_safe_z: " + params.pause_safe_z + "\n"
 				info += "; estimated_print_time: " + formatTime( seconds ) + " (" + Math.round( seconds ) + " s)\n"
 				info += "; scale_factor: " + scale_factor() + "\n"
 				info += "; set_height: " + params.set_height + (params.set_height ? " (" + params.target_height + " mm)" : "") + "\n"
@@ -1586,13 +1588,16 @@ G1 F3360
 `;
 				// the height the nozzle must lift to before parking, for the printer's
 				// pause.g and resume.g macros to read: a global variable, set by this job.
-				// RepRapFirmware 3 meta commands; other firmware will report them as
-				// unknown commands and carry on
-				const safeZ = "; pause safe height for pause.g and resume.g: the tallest pot plus 10 mm\n"
-					+ "if !exists(global.safeZ)\n"
-					+ "  global safeZ = " + mm(moves.lift_z) + "\n"
-					+ "else\n"
-					+ "  set global.safeZ = " + mm(moves.lift_z) + "\n"
+				// Needs RepRapFirmware 3.3 or later: 3.2 has no variables and cancels the
+				// print at the first of these lines, so they are off by default
+				var safeZ = ""
+				if (params.pause_safe_z) {
+					safeZ = "; pause safe height for pause.g and resume.g: the tallest pot plus 10 mm\n"
+						+ "if !exists(global.safeZ)\n"
+						+ "  global safeZ = " + mm(moves.lift_z) + "\n"
+						+ "else\n"
+						+ "  set global.safeZ = " + mm(moves.lift_z) + "\n"
+				}
 				const result = info + safeZ + header + "G1 X"+mm(sppoints[0].x)+" Y"+mm(sppoints[0].y)+"\n" + gcode + footer
 
 				saveString( result, params.user + "_" + randomID(5) + ".gcode" );
@@ -1660,6 +1665,8 @@ G1 F3360
 
 				// the printer settings are separate comment lines in the G-code header
 				for ( const line of lines ) {
+					const b = line.match( /^\s*;\s*pause_safe_z\s*:\s*(true|false)\s*$/ );
+					if ( b ) { params.pause_safe_z = ( b[1] == 'true' ) }
 					const m = line.match( /^\s*;\s*(bed_height|layer_height|line_width|copy_gap|bed_width|bed_depth|print_accel|print_jerk|path_tolerance|first_layer_speed)\s*:\s*(-?[0-9.]+)\s*$/ );
 					if ( m ) { params[ m[1] ] = parseFloat( m[2] ) }
 				}
@@ -1960,6 +1967,7 @@ G1 F3360
 				prs.add( params, 'print_jerk', 1.0, 40.0 ).name( 'Jerk (mm/s)' ).step( 1.0 ).onFinishChange( timeChanged );
 				prs.add( params, 'path_tolerance', 0.0, 0.1 ).name( 'Path tolerance (mm)' ).step( 0.005 ).onFinishChange( timeChanged );
 				prs.add( params, 'first_layer_speed', 10.0, 100.0 ).name( 'First layer speed (%)' ).step( 5.0 ).onFinishChange( timeChanged );
+				prs.add( params, 'pause_safe_z' ).name( 'Pause safe height (RRF 3.3+)' );
 				prs.add( params, 'target_height', 10.0, 250.0 ).name( 'Height (mm)' ).step( 1.0 ).onChange( scaleChanged );
 				prs.close();
 				gui.close();
