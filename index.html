@@ -126,6 +126,7 @@
 				bed_depth: 460.0,
 				print_accel: 150.0,
 				print_jerk: 10.0,
+				path_tolerance: 0.01,
 				print_time: "(turn on the toolpath)",
 
 				texture: false,
@@ -1323,8 +1324,37 @@
 					if ( out.length > 0 && q.distanceTo( out[out.length-1] ) < 0.02 ) { continue }
 					out.push( q )
 				}
+				return simplifyPath( out, params.path_tolerance )
+			}
+
+			// Merge runs of short segments: a point is dropped when it, and every other
+			// point it would stand for, lies within tol (mm) of the straight line between
+			// the kept points on either side. A corner always stands out from such a
+			// line, so corners are kept exactly; a smooth curve becomes chords. The
+			// spiral is sampled at 1000 points per turn, so this cuts the file a lot.
+			function simplifyPath( pts, tol ) {
+				if ( tol <= 0.0 || pts.length < 3 ) { return pts }
+				const out = [ pts[0] ]
+				const ab = new THREE.Vector3(), ap = new THREE.Vector3()
+				var anchor = 0
+				for (let i = 2; i < pts.length; i++) {
+					// can the chord from the anchor to i replace the points between them?
+					ab.subVectors( pts[i], pts[anchor] )
+					const l2 = ab.lengthSq()
+					var ok = true
+					for (let j = anchor+1; j < i; j++) {
+						ap.subVectors( pts[j], pts[anchor] )
+						const t = l2 > 0.0 ? Math.max( 0.0, Math.min( 1.0, ap.dot( ab )/l2 ) ) : 0.0
+						if ( ap.addScaledVector( ab, -t ).length() > tol ) { ok = false; break }
+					}
+					if ( !ok ) { out.push( pts[i-1] ); anchor = i-1 }
+				}
+				out.push( pts[pts.length-1] )
 				return out
 			}
+
+			// a coordinate for the G-code: three decimals, no trailing zeros
+			const mm = v => String( +v.toFixed(3) )
 
 			// Seconds a motion planner takes to run the moves. Each move is { d, v, dir }:
 			// length in mm, feed in mm/s, unit direction, or dir null for a retract.
@@ -1444,7 +1474,7 @@
 							layer = l
 						}
 						dd += 0.4 * p.distanceTo(lp)
-						r += "G1 X"+p.x+" Y"+p.y+" Z"+p.z+" E"+dd+"\n" 
+						r += "G1 X"+mm(p.x)+" Y"+mm(p.y)+" Z"+mm(p.z)+" E"+mm(dd)+"\n" 
 						lp = p 
 						return r 
 					}
@@ -1454,12 +1484,12 @@
 				// point, come down, prime, zero E so it stays small, and restore the print
 				// feed rate
 				const travelGcode = function( p ) {
-					const r = "G1 E"+(dd-0.5)+" F"+retract_feed+"\n"
-						+ "G1 Z"+moves.lift_z.toFixed(3)+" F"+travel_feed+"\n"
-						+ "G1 X"+p.x+" Y"+p.y+" F"+travel_feed+"\n"
+					const r = "G1 E"+mm(dd-0.5)+" F"+retract_feed+"\n"
+						+ "G1 Z"+mm(moves.lift_z)+" F"+travel_feed+"\n"
+						+ "G1 X"+mm(p.x)+" Y"+mm(p.y)+" F"+travel_feed+"\n"
 						+ layerChange( p.z )
-						+ "G1 Z"+p.z+" F"+descend_feed+"\n"
-						+ "G1 E"+dd+" F"+retract_feed+"\n"
+						+ "G1 Z"+mm(p.z)+" F"+descend_feed+"\n"
+						+ "G1 E"+mm(dd)+" F"+retract_feed+"\n"
 						+ "G92 E0\n"
 						+ "G1 F"+print_feed+"\n"
 					dd = 0
@@ -1475,7 +1505,7 @@
 //				const exporter = new OBJExporter();
 //G1 E{ext} F900
 
-				const footer = "G1 E"+(dd-0.5)+ " F900\n" + `G92 E0
+				const footer = "G1 E"+mm(dd-0.5)+ " F900\n" + `G92 E0
 G91 ; set relative coordination
 G1 Z50 F300 ;move 5mm up with 300 speed
 G90 ; set absolute coordination
@@ -1491,6 +1521,7 @@ G1 X200  F2400 ; home X axis
 				info += "; bed_depth: " + params.bed_depth + "\n"
 				info += "; print_accel: " + params.print_accel + "\n"
 				info += "; print_jerk: " + params.print_jerk + "\n"
+				info += "; path_tolerance: " + params.path_tolerance + "\n"
 				info += "; estimated_print_time: " + formatTime( seconds ) + " (" + Math.round( seconds ) + " s)\n"
 				info += "; scale_factor: " + scale_factor() + "\n"
 				info += "; set_height: " + params.set_height + (params.set_height ? " (" + params.target_height + " mm)" : "") + "\n"
@@ -1514,7 +1545,7 @@ M204 S${params.print_accel}
 ;WIDTH:3
 G1 F3360
 `;
-				const result = info + header + "G1 X"+sppoints[0].x+" Y"+sppoints[0].y+"\n" + gcode + footer
+				const result = info + header + "G1 X"+mm(sppoints[0].x)+" Y"+mm(sppoints[0].y)+"\n" + gcode + footer
 
 				saveString( result, params.user + "_" + randomID(5) + ".gcode" );
 
@@ -1581,7 +1612,7 @@ G1 F3360
 
 				// the printer settings are separate comment lines in the G-code header
 				for ( const line of lines ) {
-					const m = line.match( /^\s*;\s*(bed_height|layer_height|line_width|copy_gap|bed_width|bed_depth|print_accel|print_jerk)\s*:\s*(-?[0-9.]+)\s*$/ );
+					const m = line.match( /^\s*;\s*(bed_height|layer_height|line_width|copy_gap|bed_width|bed_depth|print_accel|print_jerk|path_tolerance)\s*:\s*(-?[0-9.]+)\s*$/ );
 					if ( m ) { params[ m[1] ] = parseFloat( m[2] ) }
 				}
 
@@ -1873,6 +1904,7 @@ G1 F3360
 				prs.add( params, 'bed_depth', 100.0, 600.0 ).name( 'Bed depth Y (mm)' ).step( 10.0 );
 				prs.add( params, 'print_accel', 50.0, 3000.0 ).name( 'Acceleration (mm/s²)' ).step( 10.0 ).onFinishChange( timeChanged );
 				prs.add( params, 'print_jerk', 1.0, 40.0 ).name( 'Jerk (mm/s)' ).step( 1.0 ).onFinishChange( timeChanged );
+				prs.add( params, 'path_tolerance', 0.0, 0.1 ).name( 'Path tolerance (mm)' ).step( 0.005 ).onFinishChange( timeChanged );
 				prs.add( params, 'target_height', 10.0, 250.0 ).name( 'Height (mm)' ).step( 1.0 ).onChange( scaleChanged );
 				prs.close();
 				gui.close();
