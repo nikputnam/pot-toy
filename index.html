@@ -93,6 +93,7 @@
 
 			const params = {
 				bottom: true,
+				bottom_layers: 3,
 				spiralize: false,
 				facet: false,
 				n_facets: 9,
@@ -787,7 +788,16 @@
 				// length of the boundary walk from sA to sB, the shorter way round
 				const dist = function( sA, sB ) { const f = ( pos(sB) - pos(sA) + L ) % L; return Math.min( f, L - f ) }
 
-				return { at: at, link: link, walk: walk, dist: dist }
+				// once round the boundary from s back to s, in the order of the points
+				function loop( s ) {
+					const i = edge(s)
+					const out = []
+					for (let j = 1; j <= N; j++) { out.push( P[(i+j)%N] ) }
+					out.push( at(s) )
+					return out
+				}
+
+				return { at: at, link: link, walk: walk, dist: dist, loop: loop }
 			}
 
 			// One raster layer filling the polygon P ([x, z] pairs) with rows parallel to x,
@@ -889,28 +899,36 @@
 				return { path: out, end: last.s }
 			}
 
-			// The three bottom layers, at heights 0, 1 and 2 layer heights: raster fills of
-			// the bottom outline with rows alternating between the x and z directions. The
-			// last layer ends where the wall starts, fn(0, 0).
+			// The params.bottom_layers bottom layers, one layer height apart from height
+			// 0. Each is a raster fill with rows alternating between the x and z
+			// directions, then a perimeter loop along the center line of the wall,
+			// fn(0, v). The rows stop one line width inside that center line, so their
+			// beads just meet the perimeter bead. The last layer's loop starts and ends
+			// where the wall starts, fn(0, 0), so the wall continues straight out of it.
 			function bottomPath( fn, scale_fact ) {
 
 				const lw = params.line_width / scale_fact
 				const lh = params.layer_height / scale_fact
-				// rows reach half a line width past the center line of the wall
-				const outline = bottomOutline( fn, 0.5*lw )
+				const perimeter = bottomOutline( fn, 0.0 )
+				const outline = bottomOutline( fn, -lw )
+				const rim = polygonPaths( perimeter )
 
 				const pts = []
-				// where the previous layer ended, as a position along the outline. Rotating
-				// the outline keeps its point order, so the position means the same place
-				// in every layer
+				// where the previous layer ended, as a position along the outline. Both
+				// polygons come from the same samples of fn, and rotating one keeps its
+				// point order, so the position means the same place on either, in every layer
 				let from = null
-				for (let layer = 0; layer < 3; layer++) {
+				for (let layer = 0; layer < params.bottom_layers; layer++) {
+					const last = ( layer == params.bottom_layers - 1 )
 					// rotate the outline so the rows of this layer run along x
 					const a = ( layer % 2 ) * 0.5*Math.PI
 					const ca = Math.cos(a), sa = Math.sin(a)
 					const P = outline.map( p => [ p[0]*ca + p[1]*sa, -p[0]*sa + p[1]*ca ] )
-					const r = rasterLayer( P, lw, from, layer == 2 )
+					const r = rasterLayer( P, lw, from, last )
 					for (const p of r.path) { pts.push( new THREE.Vector3( p[0]*ca - p[1]*sa, layer*lh, p[0]*sa + p[1]*ca ) ) }
+					// the perimeter, from where the rows ended; on the last layer the rows
+					// are followed round to the wall's start first
+					for (const p of rim.loop( r.end )) { pts.push( new THREE.Vector3( p[0], layer*lh, p[1] ) ) }
 					from = r.end
 				}
 
@@ -1226,7 +1244,7 @@
 				if (params.bottom) {
 
 					// the last bottom layer is level with the start of the wall
-					var bottom_points = bottomPath( fn, scale_fact ).map( function(p) { p.y += p0.y - 2.0*params.layer_height/scale_fact; return p } )
+					var bottom_points = bottomPath( fn, scale_fact ).map( function(p) { p.y += p0.y - (params.bottom_layers - 1)*params.layer_height/scale_fact; return p } )
 					//points = bottom_points.concat(points.map ( function(p) { p.y += params.layer_height/scale_fact } ) )
 					points = bottom_points.concat(points )
 					//					points = [ptail].concat( sp_in.concat( sp_out.concat(points ) ) )
@@ -1287,8 +1305,8 @@
 //				const ty = 0
 				var tz = params.bed_height + params.layer_height
 				if (params.bottom) {
-					// three raster layers of bottom under the wall
-					tz = params.bed_height + 3.0*params.layer_height
+					// the bottom layers under the wall
+					tz = params.bed_height + params.bottom_layers*params.layer_height
 				}
 				// one copy of the path in printer mm, centered on X0 Y0 and resting on the bed
 				const path = spiralPath( scale_factor() ).map(function(p) { 
@@ -1602,7 +1620,7 @@ G1 F3360
 
 				// only the fields the file actually carries, so a file written before an
 				// option existed leaves that option at its default
-				const fields = [ 'bottom', 'facet', 'n_facets', 'twist', 'squash', 'puff',
+				const fields = [ 'bottom', 'bottom_layers', 'facet', 'n_facets', 'twist', 'squash', 'puff',
 					'texture', 'texture_amplitude', 'texture_periods', 'texture_fraction',
 					'texture_conformal', 'uv_lscm', 'surface_image', 'image_repeat', 'image_mirror', 'image_shift',
 					'image_bump', 'image_bump_amplitude', 'set_height', 'target_height', 'copies', 'loft' ];
@@ -1747,6 +1765,12 @@ G1 F3360
 					render();
 
 					} );
+				gui.add( params, 'bottom_layers', 1, 10 ).name( 'Bottom layers' ).step( 1 ).onChange( function ( value ) {
+					if (params.spiralize) {
+						updateSplineOutline();
+						render();
+					}
+				} );
 
 				gui.add( params, 'spiralize' ).name( 'Show spiral toolpath' ).onChange( function ( value ) {
 					//splines.uniform.tension = value;
@@ -2254,6 +2278,7 @@ G1 F3360
 				//const code = '[' + ( strplace.join( ',\n\t' ) ) + ']';
 				let ppp = {};
 				ppp.bottom = params.bottom;
+				ppp.bottom_layers = params.bottom_layers;
 				ppp.facet = params.facet;
 				ppp.n_facets = params.n_facets;
 				ppp.points = splineHelperObjects.map( x => ({ x: x.position.x , y: x.position.y }) ) ;
