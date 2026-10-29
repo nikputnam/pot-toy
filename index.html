@@ -128,6 +128,7 @@
 				print_accel: 150.0,
 				print_jerk: 10.0,
 				path_tolerance: 0.01,
+				first_layer_speed: 50.0,
 				print_time: "(turn on the toolpath)",
 
 				texture: false,
@@ -900,11 +901,12 @@
 			}
 
 			// The params.bottom_layers bottom layers, one layer height apart from height
-			// 0. Each is a raster fill with rows alternating between the x and z
-			// directions, then a perimeter loop along the center line of the wall,
-			// fn(0, v). The rows stop one line width inside that center line, so their
-			// beads just meet the perimeter bead. The last layer's loop starts and ends
-			// where the wall starts, fn(0, 0), so the wall continues straight out of it.
+			// 0. Each is a perimeter loop along the center line of the wall, fn(0, v),
+			// then a raster fill with rows alternating between the x and z directions.
+			// The rows stop one line width inside the center line, so their beads just
+			// meet the perimeter bead. fn is the textured surface, so the loop follows
+			// the wall's first turn. The last layer's rows end where the wall starts,
+			// fn(0, 0).
 			function bottomPath( fn, scale_fact ) {
 
 				const lw = params.line_width / scale_fact
@@ -920,15 +922,17 @@
 				let from = null
 				for (let layer = 0; layer < params.bottom_layers; layer++) {
 					const last = ( layer == params.bottom_layers - 1 )
-					// rotate the outline so the rows of this layer run along x
+					// the perimeter, starting where the previous layer's rows ended, or at
+					// the wall's start on the first layer
+					const s0 = from === null ? 0.0 : from
+					for (const p of rim.loop( s0 )) { pts.push( new THREE.Vector3( p[0], layer*lh, p[1] ) ) }
+					// then the rows, stepping in to the outline from the loop's end. Rotate
+					// the outline so the rows of this layer run along x
 					const a = ( layer % 2 ) * 0.5*Math.PI
 					const ca = Math.cos(a), sa = Math.sin(a)
 					const P = outline.map( p => [ p[0]*ca + p[1]*sa, -p[0]*sa + p[1]*ca ] )
-					const r = rasterLayer( P, lw, from, last )
+					const r = rasterLayer( P, lw, s0, last )
 					for (const p of r.path) { pts.push( new THREE.Vector3( p[0]*ca - p[1]*sa, layer*lh, p[0]*sa + p[1]*ca ) ) }
-					// the perimeter, from where the rows ended; on the last layer the rows
-					// are followed round to the wall's start first
-					for (const p of rim.loop( r.end )) { pts.push( new THREE.Vector3( p[0], layer*lh, p[1] ) ) }
 					from = r.end
 				}
 
@@ -1205,11 +1209,10 @@
 				const uvmap = ( (texture_on && params.texture_conformal) || bump_on ) ? surfaceUV() : null
 				const uvpt = new THREE.Vector2()
 
-				var points = tv.map( function(t) {
-					var v = i*da - params.twist*t 
-					i = i + 1
-					return( [t,v]  )
-				} ).map( function([u,v]) {
+				// the surface point at (u, v) with the texture and image bump applied, v
+				// unwrapped in turns. The foot uses it too, so its contour matches the
+				// wall's first turn rather than the plain profile ring.
+				const textured = function( u, v, p ) {
 					fn(u,v%1.0,p)
 					if (texture_on || bump_on) {
 						const r = Math.sqrt( p.x*p.x + p.z*p.z )
@@ -1231,6 +1234,14 @@
 							p.z *= rs
 						}
 					}
+				}
+
+				var points = tv.map( function(t) {
+					var v = i*da - params.twist*t 
+					i = i + 1
+					return( [t,v]  )
+				} ).map( function([u,v]) {
+					textured( u, v, p )
 					return p.clone()
 //					
 				} )
@@ -1244,7 +1255,7 @@
 				if (params.bottom) {
 
 					// the last bottom layer is level with the start of the wall
-					var bottom_points = bottomPath( fn, scale_fact ).map( function(p) { p.y += p0.y - (params.bottom_layers - 1)*params.layer_height/scale_fact; return p } )
+					var bottom_points = bottomPath( textured, scale_fact ).map( function(p) { p.y += p0.y - (params.bottom_layers - 1)*params.layer_height/scale_fact; return p } )
 					//points = bottom_points.concat(points.map ( function(p) { p.y += params.layer_height/scale_fact } ) )
 					points = bottom_points.concat(points )
 					//					points = [ptail].concat( sp_in.concat( sp_out.concat(points ) ) )
@@ -1283,6 +1294,20 @@
 			const travel_feed = 9000
 			const descend_feed = 3000
 			const retract_feed = 900
+
+			// layer index of a height on the bed, for PrusaSlicer-style ;LAYER_CHANGE
+			// markers: the wall is a continuous spiral, so the index steps each time Z
+			// crosses a layer-height boundary. The first layer is index 1.
+			function layerIndex( z ) {
+				return Math.floor( (z - params.bed_height) / params.layer_height + 1e-6 )
+			}
+
+			// print feed at a height: the first layer runs at first_layer_speed percent
+			// for bed adhesion, whether it is the first bottom layer or the wall's first
+			// turn
+			function feedAt( z ) {
+				return layerIndex( z ) <= 1 ? print_feed * params.first_layer_speed / 100.0 : print_feed
+			}
 
 			// Everything exportGcode() prints, in printer mm: one copy of the toolpath
 			// centered on X0 Y0 and resting on the bed, the bed position of each copy,
@@ -1431,7 +1456,7 @@
 						add( over, pts[0], descend_feed )
 						retract()
 					}
-					for (let i = 1; i < pts.length; i++) { add( pts[i-1], pts[i], print_feed ) }
+					for (let i = 1; i < pts.length; i++) { add( pts[i-1], pts[i], feedAt( pts[i].z ) ) }
 					last = pts[pts.length-1]
 				}
 				retract()
@@ -1466,11 +1491,6 @@
 
 
 				//" "+p.x+" "+p.y+" "+p.z+"\n" //
-				// layer index for PrusaSlicer-style ;LAYER_CHANGE markers: the wall is a
-				// continuous spiral, so mark each time Z crosses a layer-height boundary
-				const layerIndex = function(z) {
-					return Math.floor( (z - params.bed_height) / params.layer_height + 1e-6 )
-				}
 				const layerChange = function(z) {
 					return ";LAYER_CHANGE\n;Z:" + z.toFixed(3) + "\n;HEIGHT:" + params.layer_height + "\n"
 				}
@@ -1479,16 +1499,18 @@
 				var lp = sppoints[0]
 				var layer = layerIndex( lp.z )
 				// one copy of the wall: the first point of each copy is reached by a travel
-				// move, so it does not extrude
+				// move, so it does not extrude. The feed is set at the start and again
+				// where the first layer ends, since the G1 lines carry none
 				const copyGcode = function( points ) {
 					layer = layerIndex( points[0].z )
 					lp = points[0]
-					return points.map(
+					return "G1 F" + feedAt( points[0].z ) + "\n" + points.map(
 						function(p){ 
 						var r = ""
 						const l = layerIndex( p.z )
 						if (l > layer) {
 							r += layerChange( p.z )
+							if ( feedAt( p.z ) != feedAt( lp.z ) ) { r += "G1 F" + feedAt( p.z ) + "\n" }
 							layer = l
 						}
 						dd += 0.4 * p.distanceTo(lp)
@@ -1499,8 +1521,7 @@
 					).reduce( (a,b)=>a+b , "")
 				}
 				// retract, lift clear of the finished pots, travel to the next copy's first
-				// point, come down, prime, zero E so it stays small, and restore the print
-				// feed rate
+				// point, come down, prime, and zero E so it stays small
 				const travelGcode = function( p ) {
 					const r = "G1 E"+mm(dd-0.5)+" F"+retract_feed+"\n"
 						+ "G1 Z"+mm(moves.lift_z)+" F"+travel_feed+"\n"
@@ -1509,7 +1530,6 @@
 						+ "G1 Z"+mm(p.z)+" F"+descend_feed+"\n"
 						+ "G1 E"+mm(dd)+" F"+retract_feed+"\n"
 						+ "G92 E0\n"
-						+ "G1 F"+print_feed+"\n"
 					dd = 0
 					return r
 				}
@@ -1540,6 +1560,7 @@ G1 X200  F2400 ; home X axis
 				info += "; print_accel: " + params.print_accel + "\n"
 				info += "; print_jerk: " + params.print_jerk + "\n"
 				info += "; path_tolerance: " + params.path_tolerance + "\n"
+				info += "; first_layer_speed: " + params.first_layer_speed + "\n"
 				info += "; estimated_print_time: " + formatTime( seconds ) + " (" + Math.round( seconds ) + " s)\n"
 				info += "; scale_factor: " + scale_factor() + "\n"
 				info += "; set_height: " + params.set_height + (params.set_height ? " (" + params.target_height + " mm)" : "") + "\n"
@@ -1563,7 +1584,16 @@ M204 S${params.print_accel}
 ;WIDTH:3
 G1 F3360
 `;
-				const result = info + header + "G1 X"+mm(sppoints[0].x)+" Y"+mm(sppoints[0].y)+"\n" + gcode + footer
+				// the height the nozzle must lift to before parking, for the printer's
+				// pause.g and resume.g macros to read: a global variable, set by this job.
+				// RepRapFirmware 3 meta commands; other firmware will report them as
+				// unknown commands and carry on
+				const safeZ = "; pause safe height for pause.g and resume.g: the tallest pot plus 10 mm\n"
+					+ "if !exists(global.safeZ)\n"
+					+ "  global safeZ = " + mm(moves.lift_z) + "\n"
+					+ "else\n"
+					+ "  set global.safeZ = " + mm(moves.lift_z) + "\n"
+				const result = info + safeZ + header + "G1 X"+mm(sppoints[0].x)+" Y"+mm(sppoints[0].y)+"\n" + gcode + footer
 
 				saveString( result, params.user + "_" + randomID(5) + ".gcode" );
 
@@ -1630,7 +1660,7 @@ G1 F3360
 
 				// the printer settings are separate comment lines in the G-code header
 				for ( const line of lines ) {
-					const m = line.match( /^\s*;\s*(bed_height|layer_height|line_width|copy_gap|bed_width|bed_depth|print_accel|print_jerk|path_tolerance)\s*:\s*(-?[0-9.]+)\s*$/ );
+					const m = line.match( /^\s*;\s*(bed_height|layer_height|line_width|copy_gap|bed_width|bed_depth|print_accel|print_jerk|path_tolerance|first_layer_speed)\s*:\s*(-?[0-9.]+)\s*$/ );
 					if ( m ) { params[ m[1] ] = parseFloat( m[2] ) }
 				}
 
@@ -1907,7 +1937,7 @@ G1 F3360
 					}
 
 				} );
-				prs.add( params, 'line_width' , 0.0, 3.0 ).name( 'Line Width' ).step(0.1).onChange( function ( value ) {
+				prs.add( params, 'line_width' , 0.5, 6.0 ).name( 'Line Width' ).step(0.1).onChange( function ( value ) {
 
 					//	splines.uniform.tension = value;
 						if (params.spiralize) { 
@@ -1929,6 +1959,7 @@ G1 F3360
 				prs.add( params, 'print_accel', 50.0, 3000.0 ).name( 'Acceleration (mm/s²)' ).step( 10.0 ).onFinishChange( timeChanged );
 				prs.add( params, 'print_jerk', 1.0, 40.0 ).name( 'Jerk (mm/s)' ).step( 1.0 ).onFinishChange( timeChanged );
 				prs.add( params, 'path_tolerance', 0.0, 0.1 ).name( 'Path tolerance (mm)' ).step( 0.005 ).onFinishChange( timeChanged );
+				prs.add( params, 'first_layer_speed', 10.0, 100.0 ).name( 'First layer speed (%)' ).step( 5.0 ).onFinishChange( timeChanged );
 				prs.add( params, 'target_height', 10.0, 250.0 ).name( 'Height (mm)' ).step( 1.0 ).onChange( scaleChanged );
 				prs.close();
 				gui.close();

@@ -82,7 +82,7 @@ path** (texture, layer structure, feed) belongs in `spiralPath()` or
 | `bbox()` | Bounding box of the current pot in scene units. |
 | `scale_factor()` | Millimeters per scene unit for export. Default fits the pot in a `max_height` x `max_width` box; `set_height` overrides with `target_height`. |
 | `spiralPath()` | The wall toolpath: one turn per layer, rising continuously. Applies the texture. Prepends `bottomPath()` when `params.bottom`. |
-| `bottomPath()` | The `bottom_layers` bottom layers: `rasterLayer()` fills of `bottomOutline()` inset one line width from the wall, rows alternating between the x and z directions, each followed by a perimeter loop along the ring `fn(0, v)`. |
+| `bottomPath()` | The `bottom_layers` bottom layers: each a perimeter loop along the textured ring `fn(0, v)`, then a `rasterLayer()` fill of `bottomOutline()` inset one line width from the wall, rows alternating between the x and z directions. |
 | `exportGcode()` | Converts the path to mm, moves it to the bed center, computes extrusion, adds the printer header/footer and `;LAYER_CHANGE` markers, downloads the file. |
 | `exportToObj()`, `exportJson()` | Other exports. `model_json()` is the settings record that also goes into the G-code header as a comment. |
 | `init()` | Builds the scene, lights, camera, the lil-gui panel, the control-point handles, and loads the default shape via `load([...])`. |
